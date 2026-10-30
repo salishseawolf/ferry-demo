@@ -3,3 +3,7 @@ dist
 .git
 data
 dumps
+# The terrain tiles come from their own image (tiles.Containerfile); the
+# routes file, a build output, comes from here.
+tiles
+!tiles/routes

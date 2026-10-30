@@ -1,0 +1,91 @@
+# Checks every pull request and every push to main: the same mise tasks as
+# locally (mise.toml), so a green run means what `mise run check`, `mise
+# run test` and `mise run build` mean.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a pull request supersedes the run under way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # mise asks GitHub for tool releases (trunk); the token avoids its rate
+  # limit. Read-only, like the workflow.
+  GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lint
+      - run: mise run check
+
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    # The database tests make scratch databases in this one; without it
+    # they'd skip.
+    services:
+      postgres:
+        # As compose.yaml: Debian-based, pinned.
+        image: docker.io/library/postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+        env:
+          POSTGRES_USER: ferry
+          POSTGRES_PASSWORD: ferry
+          POSTGRES_DB: ferry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ferry -d ferry"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://ferry:ferry@localhost:5432/ferry
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test
+      - run: mise run test
+
+  build:
+    name: Release build (wasm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust github:trunk-rs/trunk
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build
+      - run: mise run build

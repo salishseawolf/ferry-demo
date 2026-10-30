@@ -1,0 +1,30 @@
+# Checks the dependencies against the RustSec advisory database weekly, so
+# a newly found vulnerability shows up even in a week without changes;
+# and whenever Cargo.lock changes.
+name: Audit
+
+on:
+  schedule:
+    - cron: "17 14 * * 1"
+  push:
+    branches: [main]
+    paths: [Cargo.lock]
+  pull_request:
+    paths: [Cargo.lock]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
+      - run: cargo audit
