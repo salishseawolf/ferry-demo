@@ -1,3 +1,8 @@
+# The terrain tiles, published as their own image by `mise run tiles:publish`
+# (from the machine with the source rasters), which updates this pin.
+# Builds can use a local one instead: --build-arg TILES=<image>.
+ARG TILES=ghcr.io/salishseawolf/ferry-demo-tiles@sha256:978affb3477c4051b287d59752824ae505b7681e3f1f33b375e8b0ac48e21f74
+
 # The toolchain, with the same tool versions as mise.toml: shared by the
 # release build below and by the dev server (the `dev` stage, compose.yaml).
 FROM docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS toolchain
@@ -69,6 +74,8 @@ USER 65532:65532
 EXPOSE 8090
 CMD ["ferry-server"]
 
+FROM ${TILES} AS tiles
+
 # The app's image (the default target, or `--target web`): the static
 # files, served as non-root on 8080, with /api/v1/ passed to the server.
 FROM docker.io/nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6 AS web
@@ -78,6 +85,5 @@ COPY --chmod=644 nginx.conf /etc/nginx/templates/default.conf.template
 ENV NGINX_ENVSUBST_FILTER=^FERRY_ \
     FERRY_API=127.0.0.1:8090
 COPY --from=build /src/dist /usr/share/nginx/html
-# Built beforehand with `mise run tiles:elevation`.
-COPY tiles /usr/share/nginx/html/tiles
+COPY --from=tiles /tiles /usr/share/nginx/html/tiles
 EXPOSE 8080

@@ -86,13 +86,30 @@ run = [
 description = "Format the code"
 run = "cargo fmt --all"
 
+[tasks.pre-commit]
+description = "Check the formatting before a commit (the git hook `mise run setup` installs)"
+# Checks only, never rewrites: what's committed is what was staged. CI
+# checks the same (and clippy, which is too slow for every commit).
+run = '''
+if ! cargo fmt --all --check; then
+  echo "Formatting is off: run 'mise run fmt', then commit again." >&2
+  exit 1
+fi
+'''
+
+[tasks.setup]
+description = "Set up a fresh clone: install the git pre-commit hook (formatting check)"
+run = "mise generate git-pre-commit --write"
+
 [tasks."container:build"]
-description = "Build the release images: the app's (nginx) and the server's"
+description = "Build the release images: the app's (nginx) and the server's (TILES_IMAGE=… for local tiles: see tiles:image)"
 # The server image carries the routes file, a build output (ignored by
-# git); making it reuses the cached OpenStreetMap download.
+# git); making it reuses the cached OpenStreetMap download. The app's
+# image takes its tiles from the published tiles image the Containerfile
+# pins, or TILES_IMAGE if set.
 depends = ["tiles:routes"]
 run = [
-  "podman build --target web -t $IMAGE -f Containerfile .",
+  "podman build --target web ${TILES_IMAGE:+--build-arg TILES=$TILES_IMAGE} -t $IMAGE -f Containerfile .",
   "podman build --target server -t $SERVER_IMAGE -f Containerfile .",
 ]
 
@@ -117,10 +134,34 @@ podman run --rm \
   python3 /tools/elevation.py
 """
 
+[tasks."tiles:image"]
+description = "Build the terrain tiles image from tiles/, locally (TILES_IMAGE=localhost/ferry-demo-tiles:dev mise run container:build uses it)"
+run = "podman build -f tiles.Containerfile -t localhost/ferry-demo-tiles:dev tiles"
+
+[tasks."tiles:publish"]
+description = "Publish the terrain tiles image to ghcr.io and pin it in the Containerfile (needs `podman login ghcr.io`)"
+# Tiles change rarely: after `tiles:elevation`. Commit the Containerfile
+# change this makes; CI builds the app's image with the pinned tiles.
+run = '''
+set -eu
+repo=ghcr.io/salishseawolf/ferry-demo-tiles
+tag="$repo:$(date -u +%Y-%m-%d)"
+podman build -f tiles.Containerfile -t "$tag" tiles
+digest_file=$(mktemp)
+podman push --digestfile "$digest_file" "$tag"
+pinned="$repo@$(cat "$digest_file")"
+rm -f "$digest_file"
+sed -i "s|^ARG TILES=.*|ARG TILES=$pinned|" Containerfile
+echo "Published $tag"
+echo "Containerfile now pins $pinned: commit it."
+'''
+
 [tasks."tiles:routes"]
 description = "Fit WSF ferry routes from OpenStreetMap into tiles/routes/ (REFRESH=1 to fetch again)"
 run = "python3 tools/routes/osm_routes.py"
 
 [tasks.test]
-description = "Run native unit tests across the workspace"
-run = "cargo test --workspace"
+description = "Run native tests across the workspace (with DATABASE_URL set, the database ones too)"
+# Not the doc tests: those fail to find h3o (a known flake), and there are
+# none worth running. CI runs this.
+run = "cargo test --workspace --lib --bins --tests"

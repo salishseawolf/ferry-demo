@@ -1,0 +1,40 @@
+# Weekly update pull requests, each waiting two weeks after a release (as
+# the project pins only versions at least that old), grouped to keep the
+# noise down.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # The base images pinned in Containerfile and tiles.Containerfile (it
+  # matches /dockerfile|containerfile/i), and in the compose files.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14

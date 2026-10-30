@@ -1,0 +1,218 @@
+# Checks every pull request and every push to main: the same mise tasks as
+# locally (mise.toml), so a green run means what `mise run check`, `mise
+# run test` and `mise run build` mean. On main, once every check passes,
+# it publishes the release images to ghcr.io: the server's and the app's,
+# each tagged with its commit and `main`, with a provenance attestation.
+# Deploying is left to the cluster.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # By hand: on main, checks then publishes again; elsewhere, checks only.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a pull request supersedes the run under way.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  CARGO_TERM_COLOR: always
+  # mise asks GitHub for tool releases (trunk); the token avoids its rate
+  # limit. Read-only, like the workflow.
+  GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lint
+      - run: mise run check
+
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    # The database tests make scratch databases in this one; without it
+    # they'd skip.
+    services:
+      postgres:
+        # As compose.yaml: Debian-based, pinned.
+        image: docker.io/library/postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+        env:
+          POSTGRES_USER: ferry
+          POSTGRES_PASSWORD: ferry
+          POSTGRES_DB: ferry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ferry -d ferry"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://ferry:ferry@localhost:5432/ferry
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test
+      - run: mise run test
+
+  build:
+    name: Release build (wasm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: rust github:trunk-rs/trunk
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build
+      - run: mise run build
+
+  server-image:
+    name: Server image
+    # Only what passed every check is published, and only from main.
+    needs: [lint, test, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The routes file the image carries is a build output: fitted from
+      # OpenStreetMap, whose download is cached here for a week at a time.
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+        with:
+          version: 2026.10.3
+          install_args: python
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/osm
+          key: osm-${{ steps.week.outputs.week }}
+          restore-keys: osm-
+      - run: mise run tiles:routes
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/ferry-demo-server
+          tags: |
+            type=sha,format=long
+            type=raw,value=main
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: server
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/ferry-demo-server
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  web-image:
+    name: App image
+    needs: [lint, test, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The app's image takes its terrain tiles from the tiles image the
+      # Containerfile pins (published by `mise run tiles:publish`); until
+      # there is one, there's nothing to build it with.
+      - id: tiles
+        run: |
+          if grep -q '^ARG TILES=.*@sha256:' Containerfile; then
+            echo "pinned=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pinned=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No tiles image pinned yet (run mise run tiles:publish): skipping the app image."
+          fi
+      - if: steps.tiles.outputs.pinned == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.tiles.outputs.pinned == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.tiles.outputs.pinned == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/ferry-demo
+          tags: |
+            type=sha,format=long
+            type=raw,value=main
+      - if: steps.tiles.outputs.pinned == 'true'
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          target: web
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+      - if: steps.tiles.outputs.pinned == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/ferry-demo
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
