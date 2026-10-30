@@ -1,0 +1,22 @@
+[package]
+name = "ferry-server"
+version = "0.1.0"
+edition = "2024"
+description = "The ferry-demo server: polls WSF, keeps history in Postgres, and serves the app's API."
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+ferry-model = { path = "../model" }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "gzip"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "migrate", "macros", "json"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tower-http = { version = "0.7.1", features = ["compression-gzip", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5.3", features = ["util"] }

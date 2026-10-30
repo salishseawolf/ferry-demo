@@ -1,0 +1,93 @@
+# The dev environment: `mise run dev` brings it up (under `op run`, which
+# resolves the WSDOT access code) on http://localhost:8080.
+#
+# Every service shares the db service's network namespace, like the
+# containers of a Kubernetes pod: they reach each other on 127.0.0.1, as
+# Trunk.toml's proxies expect, and only the ports published on db can be
+# reached from the host.
+name: ferry-demo
+
+# The dev servers all run the Containerfile's `dev` stage: the release
+# build's toolchain, plus Python. The web service builds it; the others
+# use what it built.
+x-dev: &dev
+  image: localhost/ferry-demo:devenv
+  pull_policy: never
+  working_dir: /src
+  network_mode: service:db
+  depends_on: [db]
+
+services:
+  db:
+    # Debian-based, for real locales: text sorts as it will in production,
+    # which Alpine's musl (byte order only) wouldn't.
+    image: docker.io/library/postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    environment:
+      # Dev only, and reachable from this machine only (see ports).
+      POSTGRES_USER: ferry
+      POSTGRES_PASSWORD: ferry
+      POSTGRES_DB: ferry
+    volumes:
+      # Postgres 18's images keep data under a versioned directory here.
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:8080:8080" # the app (web)
+      - "127.0.0.1:5432:5432" # Postgres: postgres://ferry:ferry@localhost:5432/ferry
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ferry", "-d", "ferry"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # trunk, rebuilding and reloading the app as the source changes. The
+  # source is bind-mounted; build output and downloads live in volumes, so
+  # they survive restarts and stay out of the host's target/.
+  web:
+    <<: *dev
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/src:z
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+      - trunk-cache:/root/.cache/trunk
+      - target:/src/target
+    command: ["trunk", "serve", "--address", "0.0.0.0", "--port", "8080"]
+
+  # The terrain tiles, which trunk forwards /tiles/ to (Trunk.toml).
+  tiles:
+    <<: *dev
+    volumes:
+      - ./tiles:/src/tiles:ro,z
+      - ./tools:/src/tools:ro,z
+      # The current one, not the image's copy, which is only as new as
+      # the last `--build`.
+      - ./mise.toml:/src/mise.toml:ro,z
+    command: ["python3", "tools/dev/tiles_server.py", "8081", "tiles"]
+
+  # The API server (crates/server) on 127.0.0.1:8090, which trunk forwards
+  # /api/v1/ to (Trunk.toml). After changing its code, rebuild and restart
+  # it with `podman compose restart server`. Its build output has its own
+  # volume, so it doesn't wait on trunk's.
+  server:
+    <<: *dev
+    volumes:
+      - .:/src:z
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+      - server-target:/src/target
+    environment:
+      - WSDOT_API_KEY
+      - DATABASE_URL=postgres://ferry:ferry@127.0.0.1:5432/ferry
+      - BIND=127.0.0.1:8090
+      - RUST_LOG=info
+    command: ["cargo", "run", "--locked", "-p", "ferry-server"]
+
+volumes:
+  pgdata:
+  cargo-registry:
+  cargo-git:
+  trunk-cache:
+  target:
+  server-target:

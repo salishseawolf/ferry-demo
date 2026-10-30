@@ -1,0 +1,24 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+
+[watch]
+# Tiles are data, rebuilt by their own task; don't rebuild the app for them.
+ignore = ["tiles", "data", "tools"]
+
+# Tiles aren't part of the build: compose.yaml's tiles service serves tiles/
+# on 8081 and trunk forwards to it, so a rebuild never copies (or
+# half-copies) them.
+# The container copies them straight into nginx's root.
+[[proxy]]
+rewrite = "/tiles/"
+backend = "http://127.0.0.1:8081/"
+
+# The app's API, from the server (crates/server) on 8090 (compose.yaml's
+# server service).
+[[proxy]]
+rewrite = "/api/v1/"
+backend = "http://127.0.0.1:8090/api/v1/"

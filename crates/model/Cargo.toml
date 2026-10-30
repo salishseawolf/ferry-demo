@@ -1,0 +1,10 @@
+[package]
+name = "ferry-model"
+version = "0.1.0"
+edition = "2024"
+description = "Types and logic shared by the ferry-demo app and server: the API's documents, geodesy, and the route network."
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

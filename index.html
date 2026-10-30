@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>ferry-demo</title>
+    <link data-trunk rel="rust" data-wasm-opt="s" />
+    <!-- Faces served with the app, each with its OFL license beside it:
+         Source Serif 4 for ferry names (OFL.txt), Overpass and Overpass
+         Mono for the panels (OFL-Overpass.txt, OFL-OverpassMono.txt). -->
+    <link data-trunk rel="copy-dir" href="assets/fonts" />
+    <style>
+      @font-face {
+        font-family: "Source Serif 4"; font-style: italic; font-weight: 500; font-display: swap;
+        src: url("fonts/SourceSerif4-MediumItalic.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Overpass"; font-style: normal; font-weight: 400 800; font-display: swap;
+        src: url("fonts/Overpass-Latin.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Overpass Mono"; font-style: normal; font-weight: 400 600; font-display: swap;
+        src: url("fonts/OverpassMono-Latin.woff2") format("woff2");
+      }
+      /* The panels are chart paper: white, ink-ruled, with a hard offset
+         shadow; lettering after highway signs (Overpass); chart magenta
+         marks whatever is selected, as charts mark what matters. */
+      :root {
+        --paper: #ffffff;
+        --ink: #13222b;
+        --muted: #5e6e76;
+        --rule: #d5dddf;
+        --tint: #f2f6f6;
+        --mark: #b0146a;
+        --mark-tint: #fbeaf2;
+        --shadow: 3px 3px 0 rgba(19, 34, 43, 0.2);
+        --sans: "Overpass", system-ui, sans-serif;
+        --mono: "Overpass Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+        --serif: "Source Serif 4", Georgia, serif;
+        /* Edges clear of phones' notches and bars. */
+        --top: max(12px, env(safe-area-inset-top, 0px));
+        --left: max(12px, env(safe-area-inset-left, 0px));
+        --right: max(12px, env(safe-area-inset-right, 0px));
+        --bottom: max(8px, env(safe-area-inset-bottom, 0px));
+      }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12; color: var(--ink); font: 13px/1.4 var(--sans); }
+      #world { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: grab; }
+      #world.pickable { cursor: pointer; }
+      #world.measuring { cursor: crosshair; }
+      button { font: inherit; color: inherit; }
+      .paper { background: var(--paper); border: 1.5px solid var(--ink); border-radius: 4px; box-shadow: var(--shadow); }
+      .icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+      /* Small capitals for headings in every panel. */
+      .kicker, #finder-list h3, #settings h2, #legend h2, #measure h2, #perf h2 {
+        margin: 0; font: 600 10.5px/1.2 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+      }
+      .help { color: var(--muted); font-size: 12px; }
+
+      /* Ferry names over the map, set like water names on Swiss maps;
+         web.rs places them. A paper halo keeps them legible over contours. */
+      #labels { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+      #labels span {
+        position: absolute; left: 0; top: 0; white-space: nowrap;
+        font: italic 500 14px/1 var(--serif); color: #1d2733;
+        text-shadow: 0 0 2px #f7f5ee, 0 0 2px #f7f5ee, 0 0 3px #f7f5ee;
+      }
+      #labels span.idle { color: #4f5864; }
+      /* A name away from its first choice of place is led back to its
+         symbol by a hairline (web.rs Labels, placement.rs). */
+      #labels .leader {
+        position: absolute; left: 0; top: 0; height: 1px; transform-origin: 0 50%;
+        background: #1d2733; box-shadow: 0 0 0 1px rgba(247, 245, 238, 0.75);
+      }
+      #labels .leader.dim { opacity: 0.6; }
+      /* A highlighted boat's or terminal's name, in the highlight's chart
+         magenta (palette.rs VESSEL_HOVER), with a fuller halo. */
+      #labels span.lit, #labels span.terminal.lit {
+        color: var(--mark);
+        text-shadow: 0 0 2px #f7f5ee, 0 0 2px #f7f5ee, 0 0 3px #f7f5ee, 0 0 5px #f7f5ee;
+      }
+      #labels .leader.lit { background: var(--mark); }
+      /* The debug switch draws the placement: what names avoid (dashed),
+         each symbol's box, its name's slots, and the slot taken, numbered
+         by preference (0 the first choice). */
+      #labels-debug div { position: absolute; left: 0; top: 0; box-sizing: border-box; }
+      #labels-debug .obstacle { border: 1px dashed rgba(29, 39, 51, 0.6); }
+      #labels-debug .symbol { border: 1.5px solid var(--mark); }
+      #labels-debug .slot { border: 1px dotted rgba(176, 20, 106, 0.35); }
+      #labels-debug .chosen {
+        border: 1.5px solid var(--mark); background: rgba(176, 20, 106, 0.08);
+        font: 600 9px/1 var(--mono); color: var(--mark); padding: 1px 2px;
+      }
+      /* Faded back while a route is highlighted (web.rs DIM_ALPHA). */
+      #labels span.dim, #notes .note.dim { opacity: 0.8; }
+      /* Terminals are places: upright capitals, apart from boats' italics. */
+      #labels span.terminal {
+        font: 600 10.5px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
+        color: #3b4757;
+      }
+      /* Notice dots (web.rs Notes): ink buttons at a symbol's upper right,
+         each opening a paper panel of WSF's notice on hover, focus or click.
+         The dot is to scale with the terrain: web.rs sets its diameter,
+         --dot, and everything on it is a share of that. The panel's text
+         stays readable at any zoom, and its corner tucks under the dot, so
+         the pointer can cross from one to the other without losing hover. */
+      #notes { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
+      #notes .note { position: absolute; left: 0; top: 0; pointer-events: auto; }
+      #notes .note:hover, #notes .note:focus-within, #notes .note.open { z-index: 1; }
+      #notes .note { --dot: 14px; }
+      #notes .dot {
+        position: absolute; left: calc(var(--dot) / -2); top: calc(var(--dot) / -2); z-index: 1;
+        width: var(--dot); height: var(--dot); padding: 0; box-sizing: border-box;
+        display: grid; place-items: center; cursor: pointer;
+        font: italic 600 calc(var(--dot) * 0.7)/1 var(--serif); color: #f7f5ee;
+        background: #1d2733; border: calc(var(--dot) * 0.1) solid #f7f5ee; border-radius: 50%;
+        box-shadow: 0 0 0 calc(var(--dot) * 0.07) rgba(29, 39, 51, 0.35);
+      }
+      #notes .note:hover .dot, #notes .note.open .dot { border-color: var(--mark); }
+      #notes .dot:focus-visible { outline: 2px solid var(--mark); outline-offset: 1px; }
+      #notes .panel {
+        display: none; position: absolute; left: calc(var(--dot) * 0.15); top: calc(var(--dot) * 0.15);
+        width: max-content; max-width: min(300px, calc(100vw - 40px)); max-height: 45vh; overflow-y: auto;
+        padding: 12px 12px 10px 14px; border: 1.5px solid var(--ink); border-radius: 4px;
+        font: 12.5px/1.45 var(--sans); color: var(--ink); background: var(--paper);
+        box-shadow: var(--shadow); user-select: text; cursor: auto;
+      }
+      #notes .note.flip .panel { left: auto; right: calc(var(--dot) * 0.15); }
+      #notes .note.up .panel { top: auto; bottom: calc(var(--dot) * 0.15); }
+      #notes .note:hover .panel, #notes .note:focus-within .panel, #notes .note.open .panel { display: block; }
+      #notes .about { margin-bottom: 4px; font: 600 10.5px/1.2 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+      #notes section + section { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--rule); }
+      #notes h3 { margin: 0; font-size: 13px; font-weight: 800; text-wrap: balance; }
+      #notes .when { color: var(--muted); font: 11px/1.3 var(--mono); }
+      #notes p { margin: 4px 0 0; white-space: pre-line; }
+
+      /* The finder (finder.rs): the search bar, with the map settings
+         button beside it; its three best matches drop beneath, the
+         selected one's details opened accordion-style. On phones they're
+         a sheet at the bottom with three heights (peek, half, full). */
+      #finder {
+        position: fixed; top: var(--top); left: var(--left); width: min(400px, calc(100vw - 24px));
+        display: flex; flex-direction: column; gap: 8px; z-index: 2;
+      }
+      #finder .bar { display: flex; gap: 8px; }
+      #finder .field { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; }
+      #finder .field:focus-within { border-color: var(--mark); box-shadow: 3px 3px 0 rgba(176, 20, 106, 0.3); }
+      #finder-input {
+        flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent;
+        font: 600 15px/1 var(--sans); color: var(--ink);
+      }
+      #finder-input::placeholder { color: var(--muted); font-weight: 400; }
+      #finder-input::-webkit-search-cancel-button { cursor: pointer; }
+      .round { flex: none; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; cursor: pointer; }
+      .round:hover { background: var(--tint); }
+      .round[aria-expanded="true"] { color: var(--paper); background: var(--ink); }
+      .round:focus-visible, .tool:focus-visible, .chip:focus-within, .switch:focus-within, .handle:focus-visible, .copy-button:focus-visible {
+        outline: 2px solid var(--mark); outline-offset: 2px;
+      }
+      /* The matches fold up when the finder closes (web.rs: a click
+         outside it, or Enter), and down when it opens. */
+      #finder-drop {
+        display: grid; grid-template-rows: 0fr; overflow: hidden; visibility: hidden;
+        transition: grid-template-rows 0.2s ease, visibility 0s 0.2s;
+      }
+      #finder.open #finder-drop { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows 0.2s ease; }
+      /* Unpadded, so it folds all the way to nothing. */
+      #finder-drop .fold { min-height: 0; overflow: hidden; }
+      .handle { display: none; }
+      #finder-list {
+        margin: 0; padding: 4px; list-style: none; max-height: calc(100vh - 80px); max-height: calc(100dvh - 80px); overflow-y: auto;
+        background: var(--paper); border: 1.5px solid var(--ink); border-radius: 4px; box-shadow: var(--shadow);
+      }
+      #finder-list .hit + .hit { margin-top: 2px; }
+      #finder-list .row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 8px 10px; cursor: pointer; border-radius: 3px; }
+      #finder-list .row:hover { background: var(--tint); }
+      #finder-list .hit.selected .row { background: var(--mark-tint); box-shadow: inset 3px 0 0 var(--mark); }
+      #finder-list .name { font: 800 15px/1.2 var(--sans); }
+      #finder-list .kind { font: 600 10.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+      /* Details open on the selected match only. */
+      #finder-list .more { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.2s ease; }
+      #finder-list .hit.selected .more { grid-template-rows: 1fr; }
+      #finder-list .inner { overflow: hidden; padding: 0 10px; }
+      #finder-list .hit.selected .inner { padding-block: 8px 10px; }
+      #finder-list dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; margin: 0; }
+      #finder-list dt { color: var(--muted); }
+      #finder-list dd { margin: 0; }
+      #finder-list section { margin-top: 12px; }
+      #finder-list h3 { margin-bottom: 4px; }
+      #finder-list section ul { margin: 0; padding-left: 16px; }
+      /* A terminal's departures for the day (finder.rs): three columns
+         (departs, arrive by, vessel) under a header that stays put as the
+         rows scroll; the last two sailings gone (faded) lead into the next,
+         footnote numbers in magenta. */
+      #finder-list .caption { color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+      #finder-list .timetable {
+        --head: 22px;
+        margin: 0; padding: 0; list-style: none; max-height: 218px; overflow-y: auto;
+      }
+      #finder-list .timetable li {
+        /* The same columns on every row (each row is its own grid): a
+           fixed width for the vessel, so the others line up. */
+        display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) 7.5em; gap: 10px;
+        align-items: baseline; padding: 6px 4px; border-top: 1px solid var(--rule);
+      }
+      #finder-list .timetable .head {
+        position: sticky; top: 0; z-index: 2; height: var(--head); box-sizing: border-box; padding-block: 5px 0;
+        background: var(--paper); border-top: 0; border-bottom: 1.5px solid var(--ink);
+        font: 600 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+      }
+      #finder-list .timetable .head span:last-child { text-align: right; }
+      #finder-list .timetable .departs { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      #finder-list .timetable .time { font: 600 12.5px/1 var(--mono); }
+      #finder-list .timetable .to { font-size: 11.5px; color: var(--muted); }
+      /* When to arrive by car (finder.rs RowAdvice): an estimate in
+         magenta, bold when it's pressing (filling faster than usual, or
+         often full); WSF's general guidance muted, so it doesn't read as
+         one; "room" muted. Its sentence shows on resting on the row. */
+      #finder-list .timetable .advice { font: 600 12.5px/1 var(--mono); color: var(--mark); }
+      #finder-list .timetable .advice.rush { font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
+      #finder-list .timetable .advice.guidance, #finder-list .timetable .advice.room { font-weight: 400; color: var(--muted); }
+      #finder-list .timetable li[title] { cursor: help; }
+      #finder-list .timetable .vessel { justify-self: end; white-space: nowrap; color: var(--muted); font-style: italic; }
+      #finder-list .timetable .marks { margin-left: 3px; font: 600 9.5px/1 var(--mono); font-style: normal; color: var(--mark); }
+      #finder-list .timetable .gone, #finder-list .timetable .gone .advice { color: #9aa6ab; }
+      #finder-list .timetable .gone .time { font-weight: 400; }
+      /* The next sailing stays in view, like a frozen spreadsheet row:
+         scrolled past, it holds just under the header or at the bottom
+         edge, opaque over the rows behind it and ruled off from them. */
+      #finder-list .timetable .next {
+        position: sticky; top: var(--head); bottom: 0; z-index: 1;
+        background: var(--mark-tint);
+        box-shadow: inset 3px 0 0 var(--mark), 0 -1px 0 var(--rule), 0 1px 0 var(--rule);
+      }
+      #finder-list .timetable .cancelled .time, #finder-list .timetable .cancelled .to { text-decoration: line-through; }
+      #finder-list .timetable .cancelled .vessel { color: var(--mark); font-style: normal; font-weight: 600; }
+      #finder-list .footnotes { margin: 4px 0 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
+      /* Car deck use by hour (finder.rs load charts): each cell shaded
+         from the panel's tint to chart magenta by the median share of the
+         deck taken (--load); hours without sailings stay blank. */
+      #finder-list .loadchart { display: grid; gap: 2px; align-items: center; margin-top: 4px; }
+      #finder-list .loadchart .label { padding-right: 6px; color: var(--muted); font-size: 11.5px; }
+      #finder-list .loadchart i { height: 16px; border-radius: 2px; background: color-mix(in srgb, var(--mark) var(--load), var(--tint)); }
+      #finder-list .loadchart i.none { background: none; outline: 1px dashed var(--rule); outline-offset: -1px; }
+      #finder-list .loadchart .hour { font: 10px/1 var(--mono); color: var(--muted); white-space: nowrap; overflow: visible; }
+      /* A ferry's Wikipedia link (finder.rs), marked with Wikipedia's serif W. */
+      #finder-list .wikipedia {
+        display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 3px 10px 3px 4px;
+        font: 600 12.5px/1.2 var(--sans); color: var(--ink); text-decoration: none;
+        background: var(--paper); border: 1.5px solid var(--ink); border-radius: 3px;
+      }
+      #finder-list .wikipedia:hover { background: var(--tint); }
+      #finder-list .wikipedia:focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+      #finder-list .wikipedia .mark {
+        display: grid; place-items: center; width: 18px; height: 18px; border-radius: 2px;
+        font: 400 15px/1 "Linux Libertine", "Hoefler Text", Georgia, "Times New Roman", serif;
+        color: var(--paper); background: var(--ink);
+      }
+      #finder-list .bulletins {
+        max-height: 180px; overflow-y: auto; padding: 8px 10px; border-radius: 3px; background: var(--tint);
+      }
+      #finder-list .bulletins article + article { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--rule); }
+      #finder-list h4 { margin: 0; font-size: 13px; font-weight: 800; }
+      #finder-list .when { color: var(--muted); font: 11px/1.3 var(--mono); }
+      #finder-list .bulletins p { margin: 4px 0 0; white-space: pre-line; font-size: 12.5px; }
+
+      /* Map settings (web.rs), opened by the button beside the search. */
+      #settings {
+        position: fixed; top: calc(var(--top) + 52px); left: calc(var(--left) + min(400px, calc(100vw - 24px)) - 290px);
+        width: 290px; max-height: calc(100dvh - var(--top) - 70px); overflow-y: auto; padding: 14px; z-index: 3;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      /* display: flex above beats the UA's [hidden] rule, as with #error. */
+      #settings[hidden] { display: none; }
+      #settings h2:not(:first-child) { margin-top: 10px; }
+      .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .chip { position: relative; padding: 7px 11px; border: 1.5px solid var(--ink); border-radius: 3px; font: 600 13px/1 var(--sans); cursor: pointer; }
+      .chip input { position: absolute; opacity: 0; pointer-events: none; }
+      .chip:has(input:checked) { color: var(--paper); background: var(--ink); }
+      .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--rule); cursor: pointer; }
+      .switch input {
+        appearance: none; flex: none; width: 34px; height: 20px; margin: 0; border-radius: 10px; background: #c7d0d3;
+        position: relative; cursor: pointer; transition: background 0.15s ease;
+      }
+      .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); transition: left 0.15s ease; }
+      .switch input:checked { background: var(--mark); }
+      .switch input:checked::after { left: 17px; }
+      /* Tools you switch on, such as measuring (web.rs set_measuring). */
+      .tool {
+        display: flex; align-items: center; justify-content: space-between; width: 100%;
+        padding: 8px 10px; font: 600 13px/1 var(--sans); background: var(--paper);
+        border: 1.5px solid var(--ink); border-radius: 3px; cursor: pointer;
+      }
+      .tool:hover { background: var(--tint); }
+      .tool[aria-pressed="true"] { color: var(--paper); background: var(--mark); border-color: var(--mark); }
+      .tool kbd { font: 600 11px/1 var(--mono); padding: 2px 5px; border: 1px solid currentColor; border-radius: 3px; opacity: 0.75; }
+      /* Color key, filled in by legend.rs. */
+      #legend { font-size: 12px; }
+      #legend h2 { margin: 8px 0 4px; color: var(--ink); }
+      #legend p { margin: 4px 0; color: var(--muted); }
+      #legend .bar { height: 12px; border-radius: 2px; }
+      #legend .ticks { position: relative; height: 16px; margin: 2px 8px 2px; font: 11px/1.3 var(--mono); color: var(--muted); }
+      #legend .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+      #legend .row { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
+      #legend .swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; }
+      /* Map symbols in the key sit on a chip of the map's paper. */
+      #legend .chip { width: 26px; height: 14px; padding: 0; border: 0; border-radius: 2px; flex: none; background: #e7ece2; cursor: auto; }
+      #legend .line { width: 16px; height: 2px; border-radius: 1px; flex: none; }
+
+      /* Bottom left: a measurement under way, and what the pointer is on
+         (only with a pointer that hovers). Read-only but for its button. */
+      #dock {
+        position: fixed; left: var(--left); bottom: calc(var(--bottom) + 30px); width: min(300px, calc(100vw - 24px));
+        display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+      }
+      #dock > * { padding: 10px 12px; }
+      /* The ferry, terminal or route under the pointer, one fact per line
+         (web.rs); there only while there's one. */
+      #hud-vessel { font-size: 12.5px; white-space: pre-line; font-variant-numeric: tabular-nums; }
+      #hud-vessel:empty { display: none; }
+      @media (hover: none) { #hud-vessel { display: none; } }
+      #measure .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+      #measure .copy-button { pointer-events: auto; }
+      #measure dl, #perf dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+      #measure dt, #perf dt { color: var(--muted); }
+      #measure dd { margin: 0; font-family: var(--mono); }
+      #measure .help { margin-top: 4px; }
+      .copy-button {
+        display: grid; place-items: center; width: 28px; height: 28px; padding: 0; cursor: pointer;
+        background: var(--paper); border: 1.5px solid var(--ink); border-radius: 3px;
+      }
+      .copy-button:hover { background: var(--tint); }
+      /* After copying, the clipboard icon briefly becomes a check mark. */
+      .copy-button .check, .copy-button.copied .clip { display: none; }
+      .copy-button.copied .check { display: block; color: #1f6d4a; }
+      /* The debug panel (the debug switch), filled in by web.rs. */
+      #perf {
+        position: fixed; right: var(--right); bottom: calc(var(--bottom) + 30px); width: min(320px, calc(100vw - 24px));
+        max-height: calc(100dvh - var(--top) - var(--bottom) - 90px);
+        padding: 10px 12px; font-size: 12px; user-select: text;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      /* display: flex above beats the UA's [hidden] rule, as with #error. */
+      #perf[hidden] { display: none; }
+      #perf .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+      /* Its own row each: the label switch, then the copy button. */
+      #perf .foot { flex: none; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--rule); }
+      #perf .foot .switch { padding: 0; border-top: 0; }
+      #perf .foot .copy-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 32px; font: 600 12.5px/1 var(--sans); }
+      #perf dd { overflow-wrap: anywhere; }
+      #perf dd { margin: 0; text-align: right; font-family: var(--mono); }
+      #perf p { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+      /* Data credits, which the sources' licenses require. */
+      #credits {
+        position: fixed; left: var(--left); right: var(--right); bottom: var(--bottom);
+        font-size: 10px; line-height: 1.3; color: #3b4757; pointer-events: none;
+        text-shadow: 0 0 2px #f7f5ee, 0 0 2px #f7f5ee, 0 0 3px #f7f5ee;
+      }
+      #credits code { color: var(--ink); }
+      #error { position: fixed; inset: 0; display: grid; place-items: center; padding: 2rem; text-align: center; color: #ddd; }
+      /* display: grid above beats the UA's [hidden] rule; without this the
+         empty overlay covers the canvas and swallows all pointer events. */
+      #error[hidden] { display: none; }
+
+      /* Phones: the search bar spans the top, settings drop below it, the
+         matches and details are a sheet at the bottom (web.rs sets its
+         height: .sheet-peek, -half or -full on #finder), and the credits
+         ride above the sheet. */
+      @media (max-width: 700px) {
+        #finder { left: var(--left); right: var(--right); width: auto; }
+        #settings { left: var(--left); right: var(--right); width: auto; }
+        #finder-drop, #finder.open #finder-drop {
+          position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; box-sizing: border-box;
+          display: none; flex-direction: column; visibility: visible;
+          padding: 0 max(10px, env(safe-area-inset-right, 0px)) var(--bottom) max(10px, env(safe-area-inset-left, 0px));
+          background: var(--paper); border-top: 1.5px solid var(--ink); border-radius: 14px 14px 0 0;
+          box-shadow: 0 -3px 0 rgba(19, 34, 43, 0.12); transition: height 0.25s ease;
+        }
+        #finder.matched #finder-drop { display: flex; }
+        /* web.rs SHEET_PEEK_PX and SHEET_HALF_SHARE mirror these, to fit
+           views above the sheet: change them together. */
+        #finder.sheet-peek #finder-drop { height: calc(124px + var(--bottom)); }
+        #finder.sheet-half #finder-drop { height: 52dvh; }
+        #finder.sheet-full #finder-drop { height: calc(100dvh - var(--top) - 56px); }
+        #finder.sheet-peek .hit:not(.selected) { display: none; }
+        .handle {
+          display: grid; place-items: center; flex: none; width: 100%; height: 28px; padding: 0;
+          border: 0; background: transparent; cursor: pointer;
+        }
+        .handle::before { content: ""; width: 44px; height: 5px; border-radius: 3px; background: #b6c1c5; }
+        #finder-drop .fold { flex: 1; overflow-y: auto; }
+        #finder-list { max-height: none; overflow: visible; padding: 0; border: 0; box-shadow: none; border-radius: 0; }
+        #finder.matched.sheet-peek ~ #credits { bottom: calc(124px + var(--bottom) + 4px); }
+        #finder.matched.sheet-half ~ #credits { bottom: calc(52dvh + 4px); }
+        #dock { top: calc(var(--top) + 52px); bottom: auto; left: var(--left); right: var(--right); width: auto; }
+        /* Two lines, the rest a tap away (web.rs toggles .open). */
+        #credits { pointer-events: auto; cursor: pointer; }
+        #credits:not(.open) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+        /* Hung from the top here, so a fixed height keeps its foot still. */
+        #perf { top: calc(var(--top) + 52px); bottom: auto; height: min(60dvh, 520px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #finder-list .more, #finder-drop, #finder.open #finder-drop, .switch input, .switch input::after { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="world"></canvas>
+    <div id="labels" aria-hidden="true"></div>
+    <div id="notes"></div>
+    <div id="finder">
+      <div class="bar">
+        <label class="field paper">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6" /><path d="M15 15l5 5" /></svg>
+          <input id="finder-input" type="search" placeholder="Find a ferry, terminal or route" autocomplete="off" spellcheck="false"
+            role="combobox" aria-label="Find a ferry, terminal or route" aria-controls="finder-list" aria-expanded="false" aria-autocomplete="list" />
+        </label>
+        <button type="button" id="settings-toggle" class="round paper" aria-expanded="false" aria-controls="settings" aria-label="Map settings and key" title="Map settings and key">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l8 4.5-8 4.5-8-4.5z" /><path d="M4 12.5l8 4.5 8-4.5" /><path d="M4 16.5l8 4.5 8-4.5" /></svg>
+        </button>
+      </div>
+      <div id="finder-drop">
+        <button type="button" id="finder-handle" class="handle" aria-label="Show more or less of the details"></button>
+        <div class="fold"><ul id="finder-list" role="listbox" aria-label="Matches"></ul></div>
+      </div>
+    </div>
+    <div id="settings" class="paper" role="dialog" aria-label="Map settings" hidden>
+      <h2>Map style</h2>
+      <!-- Values match STYLE_CHOICES in web.rs. -->
+      <div class="chips" role="radiogroup" aria-label="Map style">
+        <label class="chip"><input type="radio" name="style" value="cartographic" checked /> Cartographic</label>
+        <label class="chip"><input type="radio" name="style" value="hypsometric" /> Height colors</label>
+      </div>
+      <h2>Layers</h2>
+      <label class="switch">Ferries (live) <input type="checkbox" id="layer-ferries" checked /></label>
+      <label class="switch">Hex grid (H3) <input type="checkbox" id="layer-cells" /></label>
+      <h2>Tools</h2>
+      <button type="button" id="measure-tool" class="tool" aria-pressed="false">Measure distance <kbd>M</kbd></button>
+      <label class="switch">Debug panel <input type="checkbox" id="debug" /></label>
+      <h2>Key</h2>
+      <div id="legend"></div>
+      <p class="help">Drag to move, scroll or pinch to zoom. Click a boat or route to zoom to it.</p>
+    </div>
+    <div id="dock">
+      <div id="measure" class="paper" hidden>
+        <div class="head">
+          <h2>Measurement</h2>
+          <button type="button" id="measure-copy" class="copy-button" title="Copy to clipboard" aria-label="Copy measurement to clipboard">
+            <svg class="clip" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8" y="2" width="8" height="4" rx="1" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+            </svg>
+            <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          </button>
+        </div>
+        <dl id="measure-readings">
+          <dt>Source</dt><dd id="measure-source"></dd>
+          <dt>Bearing</dt><dd id="measure-bearing"></dd>
+          <dt>Distance</dt><dd id="measure-distance"></dd>
+        </dl>
+        <div id="measure-status" class="help"></div>
+      </div>
+      <div id="hud-vessel" class="paper"></div>
+    </div>
+    <div id="perf" class="paper" hidden>
+      <h2>Debug</h2>
+      <div class="scroll">
+        <div id="perf-body"></div>
+        <p>Copy sends everything here, the link included: it opens this view. The map redraws only when something changes; FPS is measured while it does, capped at the display's refresh rate (vsync).</p>
+      </div>
+      <!-- At the bottom, which stays put as the rows above change. -->
+      <div class="foot">
+        <label class="switch">Label placement <input type="checkbox" id="debug-labels" /></label>
+        <button type="button" id="perf-copy" class="copy-button" title="Copy to clipboard">
+            <svg class="clip" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8" y="2" width="8" height="4" rx="1" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+            </svg>
+            <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+            Copy debug details
+        </button>
+      </div>
+    </div>
+    <div id="credits"></div>
+    <div id="error" hidden></div>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+# The release images (`mise run container:build`) run together as they
+# would in production: `mise run container:run` (under `op run`, for the
+# WSDOT access code) on http://localhost:8080.
+#
+# Like the containers of a Kubernetes pod, they share the db service's
+# network namespace: nginx reaches the server on 127.0.0.1:8090 (its
+# FERRY_API default), and only the app's port is published.
+name: ferry-demo-release
+
+services:
+  db:
+    image: docker.io/library/postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    environment:
+      POSTGRES_USER: ferry
+      POSTGRES_PASSWORD: ferry
+      POSTGRES_DB: ferry
+    volumes:
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:8080:8080" # the app (web)
+
+  server:
+    image: ${SERVER_IMAGE:-localhost/ferry-demo-server:dev}
+    network_mode: service:db
+    depends_on: [db]
+    environment:
+      - WSDOT_API_KEY
+      - DATABASE_URL=postgres://ferry:ferry@127.0.0.1:5432/ferry
+
+  web:
+    image: ${IMAGE:-localhost/ferry-demo:dev}
+    network_mode: service:db
+    depends_on: [server]
+
+volumes:
+  pgdata:

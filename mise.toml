@@ -1,0 +1,126 @@
+[tools]
+rust = { version = "1.99.0", targets = "wasm32-unknown-unknown", components = "clippy,rustfmt" }
+"github:trunk-rs/trunk" = "0.21.14"
+# For the tile and route pipelines in tools/ (the dev servers run in
+# compose.yaml, which installs its own).
+python = "3.13"
+
+[env]
+IMAGE = "localhost/ferry-demo:dev"
+SERVER_IMAGE = "localhost/ferry-demo-server:dev"
+# The 1Password reference, which `op run` resolves; a value already set (by
+# `op run`, or a container's environment) is kept, so tools run through
+# mise's shims see the resolved code.
+WSDOT_API_KEY = "{{ get_env(name='WSDOT_API_KEY', default='op://425dp2cwyte4u6pujsglwpttbq/x3yvm7ynhpkhahlhwcvjdwqczm/access_code') }}"
+
+[tasks.claude]
+description = "Start the Claude Code container for the project."
+run = """
+podman run -it --rm \
+  --hostname claude-code \
+  --device /dev/dri \
+  --device /dev/fuse \
+  --security-opt label=type:container_engine_t \
+  --cap-add=SYS_ADMIN \
+  -v "${PWD}:/workspace:z" \
+  -v "claude-home:/root/.claude" \
+  -v "claude-mise:/root/.local/share/mise" \
+  -v "claude-cargo:/root/.cargo/registry" \
+  -v "claude-cache:/root/.cache" \
+  -v "claude-podman:/var/lib/containers" \
+  -w /workspace \
+  -e TERM -e COLORTERM \
+  --tz local \
+  --group-add keep-groups \
+  ghcr.io/salishseawolf/claude-oci:web-gpu
+""""
+
+[tasks.dev]
+description = "Start the dev environment (compose.yaml) on http://localhost:8080, with Postgres on 5432"
+# The server reads the routes file (a build output, ignored by git).
+depends = ["tiles:routes"]
+run = "op run -- podman compose up --build"
+
+[tasks."dev:down"]
+description = "Stop the dev environment (its volumes, the database included, are kept)"
+run = "podman compose down"
+
+[tasks."dev:psql"]
+description = "Open psql on the dev database"
+run = "podman compose exec db psql -U ferry ferry"
+
+[tasks."dev:advice"]
+description = "Work out the record arrival advice is drawn from (the daily job; tools/k8s/compute-advice.yaml in production)"
+# The server picks up the new record within a minute.
+run = "podman compose run --rm --no-deps server cargo run --locked -p ferry-server -- compute-advice"
+
+[tasks."dev:dump"]
+description = "Dump the dev database into dumps/ (pg_dump custom format), after checking it holds no trace of the WSDOT key"
+# The server never stores the key (raw_polls keeps the path, not the URL),
+# but a WSF answer that echoed it back would be kept, so look before
+# writing a file that may be shared (tools/dev/no_key.sql). op run resolves
+# the key for the check only; it reaches psql through the environment.
+run = '''
+set -eu
+op run -- podman compose exec -T -e WSDOT_API_KEY db psql -U ferry -d ferry -qAtX -v ON_ERROR_STOP=1 < tools/dev/no_key.sql >/dev/null 2>&1 || { echo "dev:dump: stopped: the WSDOT key is in raw_polls, or the check couldn't run" >&2; exit 1; }
+mkdir -p dumps
+f="dumps/ferry-$(date -u +%Y%m%dT%H%MZ).dump"
+podman compose exec -T db pg_dump -U ferry -d ferry -Fc -Z 6 > "$f.part"
+mv "$f.part" "$f"
+ls -lh "$f"
+'''
+
+[tasks.build]
+description = "Release build into dist/"
+run = "trunk build --release"
+
+[tasks.check]
+description = "Format check, and clippy on the wasm target and natively"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --exclude ferry-server --target wasm32-unknown-unknown -- -D warnings",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+]
+
+[tasks.fmt]
+description = "Format the code"
+run = "cargo fmt --all"
+
+[tasks."container:build"]
+description = "Build the release images: the app's (nginx) and the server's"
+# The server image carries the routes file, a build output (ignored by
+# git); making it reuses the cached OpenStreetMap download.
+depends = ["tiles:routes"]
+run = [
+  "podman build --target web -t $IMAGE -f Containerfile .",
+  "podman build --target server -t $SERVER_IMAGE -f Containerfile .",
+]
+
+[tasks."container:run"]
+description = "Run the release images with Postgres (compose.release.yaml) on http://localhost:8080"
+run = "op run -- podman compose -f compose.release.yaml up"
+
+[tasks."container:down"]
+description = "Stop the release images (their database volume is kept)"
+run = "podman compose -f compose.release.yaml down"
+
+[tasks."tiles:elevation"]
+description = "Build the elevation tiles into tiles/ (downloads to data/; ZOOMS=0,1,... for some levels)"
+run = """
+mkdir -p tiles data
+podman run --rm \
+  -e ZOOMS \
+  -v ./tools/tiles:/tools:ro,z \
+  -v ./data:/cache:z \
+  -v ./tiles:/out:z \
+  ghcr.io/osgeo/gdal:ubuntu-small-3.11.4@sha256:1e450ff0e12140dc72c2ad6ff3978c96ea910187ec3ec4281a814f470606412c \
+  python3 /tools/elevation.py
+"""
+
+[tasks."tiles:routes"]
+description = "Fit WSF ferry routes from OpenStreetMap into tiles/routes/ (REFRESH=1 to fetch again)"
+run = "python3 tools/routes/osm_routes.py"
+
+[tasks.test]
+description = "Run native unit tests across the workspace"
+run = "cargo test --workspace"

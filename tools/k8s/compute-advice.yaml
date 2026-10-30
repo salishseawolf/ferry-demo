@@ -1,0 +1,49 @@
+# The daily job behind arrival advice: `ferry-server compute-advice` works
+# out each terminal's record of past sailings and stores it in Postgres
+# (advice_history); the running servers load it within a minute and
+# publish advice from it every minute after. A run that fails leaves the
+# last record in use, a day staler.
+#
+# An example to adapt to the cluster: the image, the secret holding
+# DATABASE_URL, and the namespace are placeholders. It runs on the
+# server image, so it needs the same database access as the server.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ferry-compute-advice
+spec:
+  # After WSF's trip day starts (3 AM Pacific), before the first sailings
+  # people plan for.
+  schedule: "15 3 * * *"
+  timeZone: America/Los_Angeles
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          containers:
+            - name: compute-advice
+              image: REPLACE-WITH-SERVER-IMAGE  # the ferry-demo server image
+              command: ["ferry-server", "compute-advice"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: REPLACE-WITH-SECRET  # the server's database secret
+                      key: DATABASE_URL
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }

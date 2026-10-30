@@ -1,0 +1,12 @@
+/target
+/dist
+# Built by `mise run tiles:elevation`, and its download cache.
+/tiles
+/data
+# Database dumps from `mise run dev:dump`.
+/dumps
+# Python bytecode (tools/).
+__pycache__/
+*.pyc
+# Local experiments, kept out of the repo.
+/.scratch/
