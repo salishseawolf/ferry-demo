@@ -86,6 +86,21 @@ run = [
 description = "Format the code"
 run = "cargo fmt --all"
 
+[tasks.pre-commit]
+description = "Check the formatting before a commit (the git hook `mise run setup` installs)"
+# Checks only, never rewrites: what's committed is what was staged. CI
+# checks the same (and clippy, which is too slow for every commit).
+run = '''
+if ! cargo fmt --all --check; then
+  echo "Formatting is off: run 'mise run fmt', then commit again." >&2
+  exit 1
+fi
+'''
+
+[tasks.setup]
+description = "Set up a fresh clone: install the git pre-commit hook (formatting check)"
+run = "mise generate git-pre-commit --write"
+
 [tasks."container:build"]
 description = "Build the release images: the app's (nginx) and the server's (TILES_IMAGE=… for local tiles: see tiles:image)"
 # The server image carries the routes file, a build output (ignored by

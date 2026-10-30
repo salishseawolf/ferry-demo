@@ -1,7 +1,6 @@
 # ferry-demo
 
 [![CI](https://github.com/salishseawolf/ferry-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/salishseawolf/ferry-demo/actions/workflows/ci.yml)
-[![Images](https://github.com/salishseawolf/ferry-demo/actions/workflows/images.yml/badge.svg)](https://github.com/salishseawolf/ferry-demo/actions/workflows/images.yml)
 [![Audit](https://github.com/salishseawolf/ferry-demo/actions/workflows/audit.yml/badge.svg)](https://github.com/salishseawolf/ferry-demo/actions/workflows/audit.yml)
 
 A live map of Washington State Ferries on a 3D globe of Puget Sound, written in Rust and rendered with WebGPU in the browser.
@@ -37,6 +36,7 @@ Other tasks:
 
 | Task | |
 |---|---|
+| `mise run setup` | Once per clone: installs a git hook that checks formatting before each commit |
 | `mise run check` | Formatting and clippy, for the browser build and natively |
 | `mise run test` | The tests; the database ones need `DATABASE_URL` |
 | `mise run build` | The release build of the app |
@@ -45,7 +45,7 @@ Other tasks:
 
 ## Images
 
-Every push to `main` publishes the release images, with build provenance:
+Every push to `main` that passes CI publishes the release images, with build provenance:
 
 - `ghcr.io/salishseawolf/ferry-demo`: the app (nginx), terrain tiles included
 - `ghcr.io/salishseawolf/ferry-demo-server`: the server
