@@ -19,6 +19,9 @@ pub const SHOWN: usize = 3;
 /// A timetable shows this many of the sailings already gone, before the
 /// next.
 const GONE_SHOWN: usize = 2;
+/// Said of a day's boats before it starts: WSF often reassigns them by
+/// morning (29 of 112 sailings, the first day this was measured).
+const BOATS_MAY_CHANGE: &str = "boats may change";
 /// A sailing leaving within this many minutes of its time is on time.
 const ON_TIME_MIN: i32 = 5;
 /// A timetable runs on into the next trip day's sailings this far from now
@@ -160,6 +163,8 @@ pub struct TimetableRow {
     pub day_break: Option<String>,
     /// How it went, for a sailing gone or cancelled.
     pub outcome: Option<RowOutcome>,
+    /// The boat is only WSF's plan so far: the sailing's on a later day.
+    pub tentative: bool,
 }
 
 /// A timetable row's arrival advice: what its Arrive by column says (a
@@ -694,13 +699,18 @@ impl Scope<'_> {
         };
         let first_day = &schedule.days[shown[0].0];
         let caption = if coming {
-            trip_day(&first_day.trip_date).map_or_else(
+            let caption = trip_day(&first_day.trip_date).map_or_else(
                 || first_day.season.clone(),
                 |day| match first_day.season.as_str() {
                     "" => format!("Schedule for {day}"),
                     season => format!("{season} schedule, {day}"),
                 },
-            )
+            );
+            if shown[0].0 > 0 {
+                format!("{caption} · {BOATS_MAY_CHANGE}")
+            } else {
+                caption
+            }
         } else {
             format!("No more sailings scheduled through {through}{unknown_after}")
         };
@@ -736,7 +746,10 @@ impl Scope<'_> {
                     .collect();
                 let day_break = (i != day_shown).then(|| {
                     day_shown = i;
-                    day_heading(&schedule.days[i], first_day)
+                    format!(
+                        "{} · {BOATS_MAY_CHANGE}",
+                        day_heading(&schedule.days[i], first_day)
+                    )
                 });
                 let record = record_of(d.departs_ms);
                 let outcome = match record {
@@ -766,6 +779,7 @@ impl Scope<'_> {
                         .and_then(|s| self.row_advice(s)),
                     day_break,
                     outcome,
+                    tentative: i > 0,
                 }
             })
             .collect();
@@ -863,6 +877,7 @@ impl Scope<'_> {
                 advice: None,
                 day_break,
                 outcome,
+                tentative: false,
             });
         }
         let status = if loading {
@@ -1726,6 +1741,13 @@ mod dom {
         }
         // Vessel, with its footnotes' numbers.
         let boat = add(document, &item, "span", "vessel", &row.vessel);
+        if row.tentative {
+            let _ = boat.class_list().add_1("tentative");
+            let _ = boat.set_attribute(
+                "title",
+                "WSF's plan so far: boats are often reassigned by morning",
+            );
+        }
         add(document, &boat, "sup", "marks", &row.marks);
         if detailed && let Some(outcome) = &row.outcome {
             add(document, &item, "span", "detail", &outcome.detail);
@@ -2253,12 +2275,34 @@ mod tests {
             rows_of(&table),
             [
                 ("t23", None),
-                ("t29", Some("Saturday, Oct 31")),
+                ("t29", Some("Saturday, Oct 31 · boats may change")),
                 ("t34", None)
             ]
         );
         assert_eq!(table.caption, "Fall 2026 schedule, Oct 30");
         assert_eq!(table.rows[0].when, When::Next);
+        // Today's boat stands; the next day's are only the plan so far.
+        let tentative: Vec<bool> = table.rows.iter().map(|r| r.tentative).collect();
+        assert_eq!(tentative, [false, true, true]);
+    }
+
+    #[test]
+    fn says_boats_may_change_when_only_a_later_day_is_shown() {
+        // Today's sailings are all behind the window's start: with none on
+        // record today, only the next day's show.
+        let table = timetable_of(
+            &[
+                ("2026-10-30", "", &[]),
+                ("2026-10-31", "Fall 2026", &[(29.0 * HOUR, false)]),
+            ],
+            22.0 * HOUR,
+        );
+        assert_eq!(
+            table.caption,
+            "Fall 2026 schedule, Oct 31 · boats may change"
+        );
+        assert_eq!(table.rows[0].day_break, None);
+        assert!(table.rows[0].tentative);
     }
 
     #[test]
@@ -2296,7 +2340,10 @@ mod tests {
             rows_of(&table),
             [
                 ("t20", None),
-                ("t40", Some("Saturday, Oct 31 · Winter 2027 schedule"))
+                (
+                    "t40",
+                    Some("Saturday, Oct 31 · Winter 2027 schedule · boats may change")
+                )
             ]
         );
         assert_eq!(table.caption, "Fall 2026 schedule, Oct 30");

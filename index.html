@@ -270,6 +270,8 @@
       :is(#finder-list, #finder-page) .timetable .advice.guidance, :is(#finder-list, #finder-page) .timetable .advice.room { font-weight: 400; color: var(--muted); }
       :is(#finder-list, #finder-page) .timetable li[title] { cursor: help; }
       :is(#finder-list, #finder-page) .timetable .vessel { justify-self: end; white-space: nowrap; color: var(--muted); font-style: italic; }
+      /* The next day's boat, only WSF's plan so far. */
+      :is(#finder-list, #finder-page) .timetable .vessel.tentative { color: var(--muted); opacity: 0.7; }
       :is(#finder-list, #finder-page) .timetable .marks { margin-left: 3px; font: 600 9.5px/1 var(--mono); font-style: normal; color: var(--mark); }
       :is(#finder-list, #finder-page) .timetable .gone, :is(#finder-list, #finder-page) .timetable .gone .advice { color: #9aa6ab; }
       :is(#finder-list, #finder-page) .timetable .gone .time { font-weight: 400; }
