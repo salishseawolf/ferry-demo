@@ -10,8 +10,8 @@ use crate::routes::{Leg, ServiceRoute};
 use crate::search;
 use crate::terminals::{Bulletin, Terminal, Terminals};
 use ferry_model::api::{
-    Advice, CrossingStats, GuidanceReason, LoadStats, RouteSchedule, ScheduleDay, TerminalAdvice,
-    VesselLoads,
+    Advice, CrossingStats, GuidanceReason, LoadStats, RouteSailings, RouteSchedule, SailingOutcome,
+    SailingRecord, ScheduleDay, TerminalAdvice, VesselLoads,
 };
 
 /// How many matches show.
@@ -19,6 +19,8 @@ pub const SHOWN: usize = 3;
 /// A timetable shows this many of the sailings already gone, before the
 /// next.
 const GONE_SHOWN: usize = 2;
+/// A sailing leaving within this many minutes of its time is on time.
+const ON_TIME_MIN: i32 = 5;
 /// A timetable runs on into the next trip day's sailings this far from now
 /// (ms), so it doesn't thin out as the day ends.
 const AHEAD_MS: f64 = 12.0 * 3_600_000.0;
@@ -94,6 +96,48 @@ pub struct Timetable {
     pub rows: Vec<TimetableRow>,
     /// Footnotes, numbered from 1 in order.
     pub notes: Vec<String>,
+    /// Where to see the sailings before these, if there are any.
+    pub older: Option<OlderLink>,
+}
+
+/// The way to a leg's older sailings, from a timetable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OlderLink {
+    /// By index into `routes`.
+    pub route: usize,
+    pub terminal: u32,
+    /// Before this sailing.
+    pub before_ms: i64,
+    /// What the sailings are, as the timetable's heading says.
+    pub title: String,
+}
+
+/// A page of a leg's older sailings, in place of a match's details.
+#[derive(Debug, PartialEq)]
+pub struct OlderPage {
+    pub title: String,
+    /// Newest first, each trip day under its date.
+    pub rows: Vec<TimetableRow>,
+    /// How it stands: still loading, or nothing to show.
+    pub status: String,
+    pub more: bool,
+}
+
+/// How a sailing went, in the timetable's words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowOutcome {
+    pub tag: String,
+    pub kind: OutcomeKind,
+    /// The whole of it, in a sentence.
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OutcomeKind {
+    Fine,
+    Late,
+    Cancelled,
+    Quiet,
 }
 
 #[derive(Debug, PartialEq)]
@@ -114,6 +158,8 @@ pub struct TimetableRow {
     /// printed schedules divide them (sailings after midnight go with the
     /// day before).
     pub day_break: Option<String>,
+    /// How it went, for a sailing gone or cancelled.
+    pub outcome: Option<RowOutcome>,
 }
 
 /// A timetable row's arrival advice: what its Arrive by column says (a
@@ -192,6 +238,9 @@ pub struct Scope<'a> {
     pub crossings: &'a dyn Fn(usize) -> Option<&'a CrossingStats>,
     /// The day's schedule on each route (by index into `routes`).
     pub schedules: &'a dyn Fn(usize) -> Loaded<'a, RouteSchedule>,
+    /// How each route's sailings from each terminal went (by index into
+    /// `routes` and WSF id).
+    pub sailings: &'a dyn Fn(usize, u32) -> Loaded<'a, RouteSailings>,
     /// How full each boat's latest sailings left (by WSF id), and car
     /// deck use on each route (by index into `routes`).
     pub vessel_loads: &'a dyn Fn(u32) -> Loaded<'a, VesselLoads>,
@@ -515,7 +564,7 @@ impl Scope<'_> {
                 } else {
                     "Departures".to_string()
                 };
-                self.timetable(heading, (self.schedules)(i), t.id)
+                self.timetable(heading, i, t.id)
             })
             .collect();
         Info {
@@ -530,19 +579,28 @@ impl Scope<'_> {
     /// Terminal `from`'s departures on a route's `schedule` for the day,
     /// under `heading` (which names the destination, if they all go to
     /// one).
-    fn timetable(
-        &self,
-        heading: String,
-        schedule: Loaded<'_, RouteSchedule>,
-        from: u32,
-    ) -> Timetable {
+    fn timetable(&self, heading: String, route: usize, from: u32) -> Timetable {
+        let records = match (self.sailings)(route, from) {
+            Loaded::Here(r) => Some(r),
+            _ => None,
+        };
+        let older_link = |title: &str, before_ms: i64, hidden: bool| {
+            (hidden || records.is_some_and(|r| r.more)).then(|| OlderLink {
+                route,
+                terminal: from,
+                before_ms,
+                title: title.to_string(),
+            })
+        };
+        let now = self.now_ms as i64;
         let empty = |heading: String, caption: &str| Timetable {
+            older: older_link(&heading, now, false),
             heading,
             caption: caption.to_string(),
             rows: Vec::new(),
             notes: Vec::new(),
         };
-        let schedule = match schedule {
+        let schedule = match (self.schedules)(route) {
             Loaded::Pending => return empty(heading, "Loading the schedule…"),
             Loaded::Missing => return empty(heading, "The schedule isn't available right now"),
             Loaded::Here(s) => s,
@@ -550,21 +608,57 @@ impl Scope<'_> {
         let Some(last_day) = schedule.days.last() else {
             return empty(heading, "The schedule isn't available right now");
         };
+        let record_of = |departs_ms: i64| {
+            records.and_then(|r| r.sailings.iter().find(|s| s.departs_ms == departs_ms))
+        };
+        // Sailings withdrawn stay where they were, marked, not gone without
+        // a word.
+        let withdrawn: Vec<(usize, ferry_model::api::Departure)> = records
+            .iter()
+            .flat_map(|r| &r.sailings)
+            .filter(|s| matches!(s.outcome, SailingOutcome::Cancelled { .. }))
+            .filter_map(|s| {
+                let day = schedule
+                    .days
+                    .iter()
+                    .position(|d| d.trip_date == s.trip_date)?;
+                Some((day, departure_of(s)))
+            })
+            .collect();
+        let mut cancelled: Vec<f64> = (self.terminals.list.iter())
+            .find(|t| t.id == from)
+            .map(|t| self.terminals.upcoming(t, self.now_ms))
+            .into_iter()
+            .flatten()
+            .filter(|s| s.cancelled)
+            .map(|s| s.departs_ms)
+            .collect();
+        cancelled.extend(withdrawn.iter().map(|(_, d)| d.departs_ms as f64));
         // What to show: all of the first day's, then the next day's as far
         // as `AHEAD_MS` from now, or to its first if none's come up by then.
         let mut shown = Vec::new();
         let mut coming = false;
         'days: for (i, day) in schedule.days.iter().enumerate() {
-            let Some(here) = day.terminals.iter().find(|t| t.terminal == from) else {
-                continue;
-            };
-            for d in &here.departures {
+            let here = day.terminals.iter().find(|t| t.terminal == from);
+            let notes = here.map_or(&[][..], |h| &h.notes[..]);
+            let listed = here.iter().flat_map(|h| &h.departures);
+            let again = (withdrawn.iter())
+                .filter(|(day, d)| {
+                    *day == i
+                        && !here.is_some_and(|h| {
+                            h.departures.iter().any(|s| s.departs_ms == d.departs_ms)
+                        })
+                })
+                .map(|(_, d)| d);
+            let mut sailings: Vec<&ferry_model::api::Departure> = listed.chain(again).collect();
+            sailings.sort_by_key(|d| d.departs_ms);
+            for d in sailings {
                 let departs = d.departs_ms as f64;
                 if i > 0 && coming && departs > self.now_ms + AHEAD_MS {
                     break 'days;
                 }
-                shown.push((i, d, here));
-                coming |= departs >= self.now_ms;
+                shown.push((i, d, notes));
+                coming |= departs >= self.now_ms && !cancelled.contains(&departs);
             }
         }
         // WSF's schedules can only say what's published, not why or for how
@@ -583,6 +677,7 @@ impl Scope<'_> {
         let gone = (shown.iter())
             .filter(|(_, d, _)| (d.departs_ms as f64) < self.now_ms)
             .count();
+        let hidden = gone > GONE_SHOWN;
         shown.drain(..gone.saturating_sub(GONE_SHOWN));
         let places = |d: &ferry_model::api::Departure| {
             (d.stops.iter())
@@ -609,14 +704,6 @@ impl Scope<'_> {
         } else {
             format!("No more sailings scheduled through {through}{unknown_after}")
         };
-        let cancelled: Vec<f64> = (self.terminals.list.iter())
-            .find(|t| t.id == from)
-            .map(|t| self.terminals.upcoming(t, self.now_ms))
-            .into_iter()
-            .flatten()
-            .filter(|s| s.cancelled)
-            .map(|s| s.departs_ms)
-            .collect();
         let mut next_found = false;
         let advice = match (self.advice)(from) {
             Loaded::Here(a) => Some(a),
@@ -626,18 +713,19 @@ impl Scope<'_> {
         let mut notes: Vec<String> = Vec::new();
         let mut day_shown = shown[0].0;
         let rows = (shown.iter())
-            .map(|&(i, d, here)| {
+            .map(|&(i, d, day_notes)| {
                 let departs = d.departs_ms as f64;
+                let is_cancelled = cancelled.contains(&departs);
                 let when = if departs < self.now_ms {
                     When::Gone
-                } else if !next_found {
+                } else if !next_found && !is_cancelled {
                     next_found = true;
                     When::Next
                 } else {
                     When::Later
                 };
                 let marks: Vec<String> = (d.notes.iter())
-                    .filter_map(|&n| here.notes.get(usize::from(n)))
+                    .filter_map(|&n| day_notes.get(usize::from(n)))
                     .map(|text| match notes.iter().position(|n| n == text) {
                         Some(at) => (at + 1).to_string(),
                         None => {
@@ -650,27 +738,145 @@ impl Scope<'_> {
                     day_shown = i;
                     day_heading(&schedule.days[i], first_day)
                 });
+                let record = record_of(d.departs_ms);
+                let outcome = match record {
+                    Some(r) if when == When::Gone || is_cancelled => self.outcome_of(r),
+                    _ if is_cancelled => Some(RowOutcome {
+                        tag: "cancelled".to_string(),
+                        kind: OutcomeKind::Cancelled,
+                        detail: "WSF has cancelled this sailing.".to_string(),
+                    }),
+                    _ => None,
+                };
                 TimetableRow {
                     time: (self.clock)(departs),
                     to: if one_place { String::new() } else { places(d) },
-                    vessel: d.vessel.clone(),
+                    vessel: record
+                        .filter(|_| when == When::Gone)
+                        .and_then(sailed_by)
+                        .unwrap_or(&d.vessel)
+                        .to_string(),
                     marks: marks.join(","),
                     when,
-                    cancelled: cancelled.contains(&departs),
-                    advice: (when != When::Gone && !cancelled.contains(&departs))
+                    cancelled: is_cancelled,
+                    advice: (when != When::Gone && !is_cancelled)
                         .then_some(advice)
                         .flatten()
                         .and_then(|a| a.sailings.iter().find(|s| s.departs_ms == d.departs_ms))
                         .and_then(|s| self.row_advice(s)),
                     day_break,
+                    outcome,
                 }
             })
             .collect();
         Timetable {
+            older: older_link(&heading, shown[0].1.departs_ms, hidden),
             heading,
             caption,
             rows,
             notes,
+        }
+    }
+
+    /// How a sailing went, in words; None if there's no telling.
+    fn outcome_of(&self, r: &SailingRecord) -> Option<RowOutcome> {
+        let clock = |ms: i64| (self.clock)(ms as f64);
+        let first_scheduled = |boat: &str| {
+            if boat == r.first_vessel {
+                String::new()
+            } else {
+                format!(" First scheduled for {}.", r.first_vessel)
+            }
+        };
+        let (tag, kind, detail) = match &r.outcome {
+            SailingOutcome::Ran {
+                left_ms,
+                vessel,
+                late_min,
+            } => {
+                let left = clock(*left_ms);
+                let how = match *late_min {
+                    0 => "on time".to_string(),
+                    m if m > 0 => format!("{m} min after its time"),
+                    m => format!("{} min before its time", -m),
+                };
+                let (tag, kind) = if *late_min > ON_TIME_MIN {
+                    (format!("{late_min} min late"), OutcomeKind::Late)
+                } else {
+                    ("on time".to_string(), OutcomeKind::Fine)
+                };
+                let detail = format!("{vessel} left at {left}, {how}.{}", first_scheduled(vessel));
+                (tag, kind, detail)
+            }
+            SailingOutcome::OffSchedule { left_ms, vessel } => (
+                "off schedule".to_string(),
+                OutcomeKind::Late,
+                format!(
+                    "Boats were off the schedule. {vessel} left around then, at {}.{}",
+                    clock(*left_ms),
+                    first_scheduled(vessel)
+                ),
+            ),
+            SailingOutcome::Cancelled { withdrawn_ms } => (
+                "cancelled".to_string(),
+                OutcomeKind::Cancelled,
+                format!("WSF withdrew this sailing by {}.", clock(*withdrawn_ms)),
+            ),
+            SailingOutcome::Due => (
+                "not left yet".to_string(),
+                OutcomeKind::Quiet,
+                "It's past its time, and no boat has left for it yet.".to_string(),
+            ),
+            SailingOutcome::NoRecord => (
+                "no record".to_string(),
+                OutcomeKind::Quiet,
+                "It's still on the schedule, but no boat was seen leaving for it.".to_string(),
+            ),
+            SailingOutcome::Unknown => return None,
+        };
+        Some(RowOutcome { tag, kind, detail })
+    }
+
+    /// A page of older sailings from `pages` of them in turn (each newest
+    /// first), `loading` while there are more to come.
+    pub fn older_page(&self, title: String, pages: &[&RouteSailings], loading: bool) -> OlderPage {
+        let mut rows = Vec::new();
+        let mut day: Option<&str> = None;
+        for r in pages.iter().flat_map(|p| &p.sailings) {
+            let day_break = (day != Some(r.trip_date.as_str())).then(|| {
+                day = Some(r.trip_date.as_str());
+                let date = trip_day(&r.trip_date).unwrap_or_else(|| r.trip_date.clone());
+                weekday(&r.trip_date).map_or(date.clone(), |w| format!("{w}, {date}"))
+            });
+            let outcome = self.outcome_of(r);
+            let to = (r.stops.iter())
+                .map(|&t| self.terminal_name(t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            rows.push(TimetableRow {
+                time: (self.clock)(r.departs_ms as f64),
+                to,
+                vessel: sailed_by(r).unwrap_or(&r.vessel).to_string(),
+                marks: String::new(),
+                when: When::Gone,
+                cancelled: matches!(r.outcome, SailingOutcome::Cancelled { .. }),
+                advice: None,
+                day_break,
+                outcome,
+            });
+        }
+        let status = if loading {
+            "Loading…"
+        } else if rows.is_empty() {
+            "No older sailings on record."
+        } else {
+            ""
+        };
+        OlderPage {
+            title,
+            rows,
+            status: status.to_string(),
+            more: !loading && pages.last().is_some_and(|p| p.more),
         }
     }
 
@@ -855,7 +1061,7 @@ impl Scope<'_> {
             .iter()
             .map(|&id| {
                 let heading = format!("From {}", self.terminal_name(id));
-                self.timetable(heading, (self.schedules)(i), id)
+                self.timetable(heading, i, id)
             })
             .collect();
         Info {
@@ -917,6 +1123,33 @@ fn trip_day(date: &str) -> Option<String> {
     Some(format!("{} {day}", MONTHS.get(month.checked_sub(1)?)?))
 }
 
+/// The boat that ran a sailing, if one did.
+fn sailed_by(r: &SailingRecord) -> Option<&str> {
+    match &r.outcome {
+        SailingOutcome::Ran { vessel, .. } | SailingOutcome::OffSchedule { vessel, .. } => {
+            Some(vessel)
+        }
+        _ => None,
+    }
+}
+
+/// A sailing on record as a schedule's departure.
+fn departure_of(r: &SailingRecord) -> ferry_model::api::Departure {
+    ferry_model::api::Departure {
+        departs_ms: r.departs_ms,
+        vessel_id: None,
+        vessel: r.vessel.clone(),
+        stops: (r.stops.iter())
+            .map(|&terminal| ferry_model::api::Stop {
+                terminal,
+                arrives_ms: None,
+            })
+            .collect(),
+        loading: ferry_model::api::Loading::Both,
+        notes: Vec::new(),
+    }
+}
+
 /// The name of a date's day of the week (Sakamoto's method).
 fn weekday(date: &str) -> Option<&'static str> {
     const DAYS: [&str; 7] = [
@@ -970,7 +1203,7 @@ mod dom {
     use wasm_bindgen::JsCast;
     use web_sys::{Document, Element, HtmlInputElement};
 
-    use super::{Entry, Info, Urgency, When};
+    use super::{Entry, Info, OlderPage, OutcomeKind, TimetableRow, Urgency, When};
 
     /// How much of the screen the matches take on a phone, where they're a
     /// sheet at the bottom (index.html): a peek at the selected one, half
@@ -1005,16 +1238,25 @@ mod dom {
         /// The details last built, to leave them be when unchanged.
         built: String,
         sheet: Sheet,
+        /// The page of older sailings over the details (#finder-page), what
+        /// it last showed, and where the details were scrolled to when it
+        /// opened (the list on a desk, the sheet on a phone).
+        page: Element,
+        page_built: Option<String>,
+        behind_page: (i32, i32),
     }
 
     /// How long (ms) the pointer rests on a match before it opens.
     const REST_MS: f64 = 1000.0;
 
     impl Finder {
-        pub fn new(input: HtmlInputElement, list: Element) -> Self {
+        pub fn new(input: HtmlInputElement, list: Element, page: Element) -> Self {
             Self {
                 input,
                 list,
+                page,
+                page_built: None,
+                behind_page: (0, 0),
                 entries: Vec::new(),
                 selected: None,
                 resting: None,
@@ -1025,6 +1267,74 @@ mod dom {
 
         fn document(&self) -> Document {
             self.list.owner_document().expect("document")
+        }
+
+        /// Shows a page of older sailings over the details, or goes back
+        /// to them just as they were.
+        pub fn set_older(&mut self, page: Option<&OlderPage>) {
+            let fold = self.list.parent_element();
+            let Some(page) = page else {
+                if self.page_built.take().is_some() {
+                    let _ = self.page.set_attribute("hidden", "");
+                    if let Some(fold) = &fold {
+                        let _ = fold.class_list().remove_1("paged");
+                        fold.set_scroll_top(self.behind_page.1);
+                    }
+                    self.list.set_scroll_top(self.behind_page.0);
+                }
+                return;
+            };
+            let content = format!("{page:?}");
+            if self.page_built.as_ref() == Some(&content) {
+                return;
+            }
+            let opening = self.page_built.is_none();
+            let select = |id: &str| self.page.query_selector(id).ok().flatten();
+            if let Some(el) = select("#finder-page-title") {
+                el.set_text_content(Some(&page.title));
+            }
+            if let Some(el) = select("#finder-page-status") {
+                el.set_text_content(Some(&page.status));
+            }
+            if let Some(button) = select("#finder-page-more") {
+                if page.more {
+                    let _ = button.remove_attribute("hidden");
+                } else {
+                    let _ = button.set_attribute("hidden", "");
+                }
+            }
+            if let Some(list) = select("#finder-page-rows") {
+                let document = self.document();
+                list.set_text_content(None);
+                let head = add(&document, &list, "li", "head", "");
+                let _ = head.set_attribute("aria-hidden", "true");
+                for label in ["Departs", "How it went", "Vessel"] {
+                    add(&document, &head, "span", "", label);
+                }
+                for row in &page.rows {
+                    add_row(&document, &list, row, true);
+                }
+            }
+            self.page_built = Some(content);
+            if opening {
+                let fold_scroll = fold.as_ref().map_or(0, |f| f.scroll_top());
+                self.behind_page = (self.list.scroll_top(), fold_scroll);
+                let _ = self.page.remove_attribute("hidden");
+                if let Some(fold) = &fold {
+                    let _ = fold.class_list().add_1("paged");
+                    fold.set_scroll_top(0);
+                }
+                self.page.set_scroll_top(0);
+                if let Some(back) = self
+                    .page
+                    .query_selector("#finder-page-back")
+                    .ok()
+                    .flatten()
+                    .and_then(|b| b.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    let _ = back.focus();
+                }
+            }
         }
 
         /// Lists `entries`, the first selected.
@@ -1247,6 +1557,9 @@ mod dom {
                 add(&document, &section, "h3", "", &table.heading);
                 add(&document, &section, "div", "caption", &table.caption);
                 if table.rows.is_empty() {
+                    if let Some(link) = &table.older {
+                        add_older_button(&document, &section, link);
+                    }
                     continue;
                 }
                 let list = add(&document, &section, "ol", "timetable", "");
@@ -1256,48 +1569,12 @@ mod dom {
                 for label in ["Departs", "Arrive by", "Vessel"] {
                     add(&document, &head, "span", "", label);
                 }
+                if let Some(link) = &table.older {
+                    let item = add(&document, &list, "li", "older", "");
+                    add_older_button(&document, &item, link);
+                }
                 for row in &table.rows {
-                    if let Some(day) = &row.day_break {
-                        add(&document, &list, "li", "day", day);
-                    }
-                    let class = match row.when {
-                        When::Gone => "gone",
-                        When::Next => "next",
-                        When::Later => "",
-                    };
-                    let item = add(&document, &list, "li", class, "");
-                    if row.cancelled {
-                        let _ = item.class_list().add_1("cancelled");
-                    }
-                    // Departs: the time, and where to if the timetable
-                    // goes to several places.
-                    let departs = add(&document, &item, "span", "departs", "");
-                    add(&document, &departs, "span", "time", &row.time);
-                    if !row.to.is_empty() {
-                        add(&document, &departs, "span", "to", &row.to);
-                    }
-                    // Arrive by: the recommended time, its sentence on
-                    // resting the pointer on the row.
-                    let arrive = add(&document, &item, "span", "advice", "");
-                    if let Some(advice) = &row.advice {
-                        let _ = item.set_attribute("title", &advice.sentence);
-                        let class = match advice.urgency {
-                            Urgency::Rush => "advice rush",
-                            Urgency::Guidance => "advice guidance",
-                            Urgency::Room => "advice room",
-                            Urgency::ArriveBy => "advice",
-                        };
-                        arrive.set_class_name(class);
-                        arrive.set_text_content(Some(&advice.tag));
-                    }
-                    // Vessel, with its footnotes' numbers.
-                    let vessel = if row.cancelled {
-                        format!("{} (cancelled)", row.vessel)
-                    } else {
-                        row.vessel.clone()
-                    };
-                    let boat = add(&document, &item, "span", "vessel", &vessel);
-                    add(&document, &boat, "sup", "marks", &row.marks);
+                    add_row(&document, &list, row, false);
                 }
                 let _ = list.set_attribute("data-heading", &table.heading);
                 match scrolled_by_reader.get(&table.heading) {
@@ -1391,6 +1668,70 @@ mod dom {
 
     /// A new `tag` element in `parent`, with a class and text (WSF's text
     /// only ever as text).
+    /// A "See older" button, saying where it leads (read by web/setup.rs).
+    fn add_older_button(document: &Document, parent: &Element, link: &super::OlderLink) {
+        let button = add(document, parent, "button", "older-link", "See older");
+        let _ = button.set_attribute("type", "button");
+        let _ = button.set_attribute("data-older-route", &link.route.to_string());
+        let _ = button.set_attribute("data-older-terminal", &link.terminal.to_string());
+        let _ = button.set_attribute("data-older-before", &link.before_ms.to_string());
+        let _ = button.set_attribute("data-older-title", &link.title);
+    }
+
+    /// A timetable's row, under its trip day if one starts here; with how
+    /// it went spelled out if `detailed`, or else on resting the pointer.
+    fn add_row(document: &Document, list: &Element, row: &TimetableRow, detailed: bool) {
+        if let Some(day) = &row.day_break {
+            add(document, list, "li", "day", day);
+        }
+        let class = match row.when {
+            When::Gone => "gone",
+            When::Next => "next",
+            When::Later => "",
+        };
+        let item = add(document, list, "li", class, "");
+        if row.cancelled {
+            let _ = item.class_list().add_1("cancelled");
+        }
+        // Departs: the time, and where to if the timetable goes to several
+        // places.
+        let departs = add(document, &item, "span", "departs", "");
+        add(document, &departs, "span", "time", &row.time);
+        if !row.to.is_empty() {
+            add(document, &departs, "span", "to", &row.to);
+        }
+        // Arrive by: the recommended time, its sentence on resting the
+        // pointer on the row. For a sailing gone, how it went instead.
+        let arrive = add(document, &item, "span", "advice", "");
+        if let Some(advice) = &row.advice {
+            let _ = item.set_attribute("title", &advice.sentence);
+            let class = match advice.urgency {
+                Urgency::Rush => "advice rush",
+                Urgency::Guidance => "advice guidance",
+                Urgency::Room => "advice room",
+                Urgency::ArriveBy => "advice",
+            };
+            arrive.set_class_name(class);
+            arrive.set_text_content(Some(&advice.tag));
+        }
+        if let Some(outcome) = &row.outcome {
+            let _ = item.set_attribute("title", &outcome.detail);
+            arrive.set_class_name(match outcome.kind {
+                OutcomeKind::Fine => "advice outcome fine",
+                OutcomeKind::Late => "advice outcome late",
+                OutcomeKind::Cancelled => "advice outcome cancelled",
+                OutcomeKind::Quiet => "advice outcome quiet",
+            });
+            arrive.set_text_content(Some(&outcome.tag));
+        }
+        // Vessel, with its footnotes' numbers.
+        let boat = add(document, &item, "span", "vessel", &row.vessel);
+        add(document, &boat, "sup", "marks", &row.marks);
+        if detailed && let Some(outcome) = &row.outcome {
+            add(document, &item, "span", "detail", &outcome.detail);
+        }
+    }
+
     fn add(document: &Document, parent: &Element, tag: &str, class: &str, text: &str) -> Element {
         let el = document.create_element(tag).expect("element");
         if !class.is_empty() {
@@ -1519,6 +1860,7 @@ mod tests {
             legs: &[],
             crossings: &loaded,
             schedules: &scheduled,
+            sailings: &|_, _| Loaded::Missing,
             vessel_loads: &vessel_loads,
             route_loads: &route_loads,
             advice: &advice,
@@ -1637,6 +1979,7 @@ mod tests {
         let scope = Scope {
             crossings: &loading,
             schedules: &pending,
+            sailings: &|_, _| Loaded::Missing,
             route_loads: &pending_stats,
             ..scope
         };
@@ -1654,6 +1997,11 @@ mod tests {
 
     /// A timetable from terminal 12 (to 8) at `now`, of two days' sailings.
     fn timetable_of(days: &[TestDay<'_>], now: f64) -> Timetable {
+        timetable_with(days, None, now)
+    }
+
+    /// The same, with how sailings went.
+    fn timetable_with(days: &[TestDay<'_>], record: Option<&RouteSailings>, now: f64) -> Timetable {
         let days: Vec<serde_json::Value> = days
             .iter()
             .map(|(date, season, sailings)| {
@@ -1684,23 +2032,34 @@ mod tests {
             "route": "edmonds-kingston", "days": days,
         }))
         .unwrap();
-        schedule_scope(now, |scope| {
-            scope.timetable("Departures".to_string(), Loaded::Here(&schedule), 12)
+        let schedules = |_: usize| Loaded::Here(&schedule);
+        let sailings = |_: usize, _: u32| record.map_or(Loaded::Missing, Loaded::Here);
+        with_scope(now, &schedules, &sailings, |scope| {
+            scope.timetable("Departures".to_string(), 0, 12)
         })
     }
 
-    /// Calls `f` with a scope holding nothing but the time.
-    fn schedule_scope<R>(now: f64, f: impl Fn(&Scope<'_>) -> R) -> R {
-        let fleet = Fleet::default();
-        let terminals = Terminals::default();
-        let clock = |ms: f64| format!("t{}", (ms / HOUR) as i64);
+    /// Calls `f` with a scope holding only the schedules and sailings.
+    fn with_scope<'a, R>(
+        now: f64,
+        schedules: &'a dyn Fn(usize) -> Loaded<'a, RouteSchedule>,
+        sailings: &'a dyn Fn(usize, u32) -> Loaded<'a, RouteSailings>,
+        f: impl Fn(&Scope<'_>) -> R,
+    ) -> R {
+        fn clock(ms: f64) -> String {
+            format!("t{}", (ms / HOUR) as i64)
+        }
+        // Scope's parts share one lifetime, which these must outlast.
+        let fleet: &'static Fleet = Box::leak(Box::default());
+        let terminals: &'static Terminals = Box::leak(Box::default());
         let scope = Scope {
-            fleet: &fleet,
-            terminals: &terminals,
+            fleet,
+            terminals,
             routes: &[],
             legs: &[],
             crossings: &|_| None,
-            schedules: &|_| Loaded::Missing,
+            schedules,
+            sailings,
             vessel_loads: &|_| Loaded::Missing,
             route_loads: &|_| Loaded::Missing,
             advice: &|_| Loaded::Missing,
@@ -1709,6 +2068,157 @@ mod tests {
             date_clock: &clock,
         };
         f(&scope)
+    }
+
+    /// Sailings on record, at these hours, each with how it went.
+    fn records(sailings: Vec<(f64, serde_json::Value)>, more: bool) -> RouteSailings {
+        let sailings: Vec<serde_json::Value> = sailings
+            .into_iter()
+            .map(|(hour, outcome)| {
+                serde_json::json!({
+                    "trip_date": "2026-10-30", "departs_ms": (hour * HOUR) as i64, "stops": [8],
+                    "vessel": "Spokane", "first_vessel": "Spokane", "outcome": outcome,
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "route": "edmonds-kingston", "terminal": 12, "sailings": sailings, "more": more,
+        }))
+        .unwrap()
+    }
+
+    fn ran(hour: f64, vessel: &str, late_min: i32) -> serde_json::Value {
+        let left = (hour * HOUR) as i64 + i64::from(late_min) * 60_000;
+        serde_json::json!({"kind": "ran", "left_ms": left, "vessel": vessel, "late_min": late_min})
+    }
+
+    /// (time, outcome's tag, vessel) of each row.
+    fn outcomes_of(table: &Timetable) -> Vec<(&str, Option<&str>, &str)> {
+        (table.rows.iter())
+            .map(|r| {
+                (
+                    r.time.as_str(),
+                    r.outcome.as_ref().map(|o| o.tag.as_str()),
+                    r.vessel.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn says_how_sailings_went_and_who_ran_them() {
+        const DAY: TestDay<'_> = (
+            "2026-10-30",
+            "Fall 2026",
+            &[
+                (6.0 * HOUR, false),
+                (7.0 * HOUR, false),
+                (8.0 * HOUR, false),
+                (11.0 * HOUR, false),
+            ],
+        );
+        let doc = records(
+            vec![
+                (6.0, ran(6.0, "Spokane", 1)),
+                // Salish ran what WSF has as Spokane's, 12 minutes late.
+                (7.0, ran(7.0, "Salish", 12)),
+                (8.0, serde_json::json!({"kind": "no_record"})),
+            ],
+            false,
+        );
+        let table = timetable_with(&[DAY], Some(&doc), 10.0 * HOUR);
+        // The last two gone; the first of them behind "See older".
+        assert_eq!(
+            outcomes_of(&table),
+            [
+                ("t7", Some("12 min late"), "Salish"),
+                ("t8", Some("no record"), "Spokane"),
+                ("t11", None, "Spokane"),
+            ]
+        );
+        assert_eq!(
+            table.older,
+            Some(OlderLink {
+                route: 0,
+                terminal: 12,
+                before_ms: (7.0 * HOUR) as i64,
+                title: table.heading.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_sailing_stays_marked_and_isnt_next() {
+        const DAY: TestDay<'_> = ("2026-10-30", "Fall 2026", &[(12.0 * HOUR, false)]);
+        let withdrawn = serde_json::json!({"kind": "cancelled", "withdrawn_ms": 0});
+        let doc = records(vec![(11.0, withdrawn)], false);
+        let table = timetable_with(&[DAY], Some(&doc), 10.0 * HOUR);
+        assert_eq!(
+            outcomes_of(&table),
+            [
+                ("t11", Some("cancelled"), "Spokane"),
+                ("t12", None, "Spokane")
+            ]
+        );
+        assert!(table.rows[0].cancelled);
+        assert_eq!(table.rows[0].when, When::Later);
+        assert_eq!(table.rows[1].when, When::Next);
+        // No older sailings, so no way to them.
+        assert_eq!(table.older, None);
+    }
+
+    #[test]
+    fn offers_older_sailings_even_with_none_scheduled() {
+        const DAY: TestDay<'_> = ("2026-10-30", "", &[]);
+        let table = timetable_with(
+            &[DAY, ("2026-10-31", "", &[])],
+            Some(&records(vec![], true)),
+            10.0 * HOUR,
+        );
+        assert!(table.rows.is_empty());
+        assert_eq!(table.older.map(|o| o.before_ms), Some((10.0 * HOUR) as i64));
+    }
+
+    #[test]
+    fn pages_older_sailings_by_trip_day() {
+        let mut older = records(
+            vec![
+                (9.0, ran(9.0, "Spokane", 0)),
+                (8.0, serde_json::json!({"kind": "unknown"})),
+            ],
+            true,
+        );
+        older.sailings[1].trip_date = "2026-10-29".to_string();
+        older.sailings[1].first_vessel = "Puyallup".to_string();
+        let schedules = |_: usize| Loaded::Missing;
+        let sailings = |_: usize, _: u32| Loaded::Missing;
+        let page = with_scope(0.0, &schedules, &sailings, |scope| {
+            scope.older_page("Departures".to_string(), &[&older], false)
+        });
+        assert_eq!(page.title, "Departures");
+        assert!(page.more);
+        assert_eq!(page.status, "");
+        let days: Vec<Option<&str>> = page.rows.iter().map(|r| r.day_break.as_deref()).collect();
+        assert_eq!(days, [Some("Friday, Oct 30"), Some("Thursday, Oct 29")]);
+        // No telling how it went: nothing claimed.
+        assert_eq!(page.rows[1].outcome, None);
+        assert!(
+            page.rows[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .detail
+                .contains("Spokane left at")
+        );
+        // While loading it says so, and offers no more; empty, it says that.
+        let page = with_scope(0.0, &schedules, &sailings, |scope| {
+            scope.older_page("Departures".to_string(), &[&older], true)
+        });
+        assert_eq!((page.status.as_str(), page.more), ("Loading…", false));
+        let page = with_scope(0.0, &schedules, &sailings, |scope| {
+            scope.older_page("Departures".to_string(), &[], false)
+        });
+        assert_eq!(page.status, "No older sailings on record.");
     }
 
     const HOUR: f64 = 3_600_000.0;

@@ -52,7 +52,7 @@ pub async fn crossings(pool: &PgPool, route: &str, days: u32) -> Result<Option<C
 }
 
 /// The terminals route `route` calls at; None if there's no such route.
-async fn route_terminals(pool: &PgPool, route: &str) -> Result<Option<Vec<i32>>> {
+pub async fn route_terminals(pool: &PgPool, route: &str) -> Result<Option<Vec<i32>>> {
     let terminals: Vec<i32> =
         sqlx::query_scalar("SELECT terminal_id FROM route_terminals WHERE route_id = $1")
             .bind(route)

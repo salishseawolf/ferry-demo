@@ -20,6 +20,7 @@ mod http;
 mod live;
 mod published;
 mod reference;
+mod sailings;
 mod schedule;
 mod stats;
 mod wsf;

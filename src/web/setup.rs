@@ -159,6 +159,9 @@ pub(super) async fn run() -> Result<(), String> {
         credits_base,
         crossings: Fetches::new(CROSSINGS_KEEP_MS),
         schedules: Fetches::new(SCHEDULES_KEEP_MS),
+        sailings: Fetches::new(VESSEL_LOADS_KEEP_MS),
+        older_sailings: Fetches::new(SCHEDULES_KEEP_MS),
+        older: None,
         route_loads: Fetches::new(CROSSINGS_KEEP_MS),
         vessel_loads: Fetches::new(VESSEL_LOADS_KEEP_MS),
         advice: Fetches::new(VESSEL_LOADS_KEEP_MS),
@@ -190,6 +193,7 @@ pub(super) async fn run() -> Result<(), String> {
                 .dyn_into()
                 .map_err(|_| "#finder-input is not an input")?,
             element("finder-list")?,
+            element("finder-page")?,
         ),
         finder_stale: false,
         service_routes: Vec::new(),
@@ -371,10 +375,16 @@ pub(super) async fn run() -> Result<(), String> {
         "click",
         &app,
         move |app, e: web_sys::Event| {
-            // Clicks within an open match's details (scrolling notices) stay.
-            let on_row = e
-                .target()
-                .and_then(|t| t.dyn_into::<Element>().ok())
+            let clicked = e.target().and_then(|t| t.dyn_into::<Element>().ok());
+            if let Some(button) =
+                (clicked.as_ref()).and_then(|el| el.closest(".older-link").ok().flatten())
+            {
+                app.open_older(&button);
+                return;
+            }
+            // Other clicks within an open match's details (scrolling
+            // notices) stay.
+            let on_row = (clicked.as_ref())
                 .and_then(|el| el.closest(".row").ok().flatten())
                 .is_some();
             if !on_row {
@@ -385,6 +395,29 @@ pub(super) async fn run() -> Result<(), String> {
                 && app.finder.select(i)
             {
                 app.selection_changed();
+            }
+        },
+    );
+    // The page of older sailings: back, more, and Escape.
+    listen(
+        &element("finder-page-back")?.into(),
+        "click",
+        &app,
+        |app, _: web_sys::Event| app.close_older(),
+    );
+    listen(
+        &element("finder-page-more")?.into(),
+        "click",
+        &app,
+        |app, _: web_sys::Event| app.more_older(),
+    );
+    listen(
+        &element("finder-page")?.into(),
+        "keydown",
+        &app,
+        |app, e: KeyboardEvent| {
+            if e.key() == "Escape" {
+                app.close_older();
             }
         },
     );

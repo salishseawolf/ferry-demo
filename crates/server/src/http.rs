@@ -140,6 +140,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/vessels", get(vessels))
         .route("/stats/crossings", get(crossings))
         .route("/schedule", get(schedule))
+        .route("/sailings", get(sailings))
         .route("/loads", get(loads))
         .route("/advice", get(advice))
         .route("/stats/advice", get(advice_check))
@@ -409,6 +410,64 @@ async fn schedule(
             "not_found",
             &format!("No route {route:?}"),
         ),
+    }
+}
+
+/// `/sailings?route=…&terminal=…[&before_ms=…&limit=…]`: how sailings went.
+async fn sailings(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let route = params.get("route").filter(|r| !r.is_empty());
+    let terminal = params.get("terminal").and_then(|t| t.parse::<u32>().ok());
+    let (Some(route), Some(terminal)) = (route, terminal) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Give a route and a terminal's WSF id, as ?route=…&terminal=…",
+        );
+    };
+    let before_ms = match params.get("before_ms").map(|b| b.parse::<i64>()) {
+        None => None,
+        Some(Ok(ms)) => Some(ms),
+        Some(Err(_)) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "before_ms is epoch ms",
+            );
+        }
+    };
+    let limit = match params.get("limit").map(|l| l.parse::<u32>()) {
+        None => crate::sailings::PAGE,
+        Some(Ok(l)) if (1..=crate::sailings::PAGE_MAX).contains(&l) => l,
+        Some(_) => {
+            let message = format!(
+                "limit is a whole number from 1 to {}",
+                crate::sailings::PAGE_MAX
+            );
+            return error(StatusCode::BAD_REQUEST, "bad_request", &message);
+        }
+    };
+    let Some(pool) = state.db.get() else {
+        return serve(None, 1, &headers);
+    };
+    match crate::sailings::for_terminal(pool, route, terminal, before_ms, limit, now_ms()).await {
+        Ok(Some(found)) => serve(Some(Doc::json(&found)), LOADS_MAX_AGE_S, &headers),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("No route {route:?}"),
+        ),
+        Err(e) => {
+            tracing::warn!("couldn't read the sailings: {e:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "Couldn't read the sailings",
+            )
+        }
     }
 }
 

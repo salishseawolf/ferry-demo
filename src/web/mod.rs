@@ -40,7 +40,7 @@ use crate::tiles::TerrainLoader;
 use crate::view::{LAYER_CELLS, LAYER_FERRIES, STYLE_CARTOGRAPHIC, STYLE_HYPSOMETRIC};
 use ferry_model::api::{
     AdviceCheck, CrossingStats, LiveNotices, LiveSailings, LiveVessels, LoadStats, Network,
-    RouteSchedule, TerminalAdvice, VesselLoads, Vessels,
+    RouteSailings, RouteSchedule, TerminalAdvice, VesselLoads, Vessels,
 };
 use glam::DVec3;
 
@@ -57,6 +57,8 @@ use setup::run;
 
 /// A press that moves less than this (CSS px) is a click, not a drag.
 const CLICK_SLOP_PX: f64 = 4.0;
+/// Older sailings to a page.
+const OLDER_PAGE: u32 = 40;
 const LINE_WIDTH_CSS_PX: f64 = 2.0;
 /// Layer tray checkboxes and the layer bit each controls.
 const LAYER_TOGGLES: [(&str, u32); 2] = [
@@ -167,6 +169,18 @@ pub fn start() {
     });
 }
 
+/// The page of a leg's older sailings being looked at, over the details of
+/// what's selected.
+struct OlderView {
+    target: Target,
+    route: usize,
+    terminal: u32,
+    before_ms: i64,
+    title: String,
+    /// How many pages have been asked for.
+    pages: usize,
+}
+
 struct Press {
     start: (f64, f64),
     last: (f64, f64),
@@ -229,6 +243,11 @@ struct App {
     /// how full boats' latest sailings left, by WSF id.
     crossings: Fetches<CrossingStats>,
     schedules: Fetches<RouteSchedule>,
+    /// How each route's sailings from each terminal went today, and the
+    /// older ones being looked through.
+    sailings: Fetches<RouteSailings>,
+    older_sailings: Fetches<RouteSailings>,
+    older: Option<OlderView>,
     route_loads: Fetches<LoadStats>,
     vessel_loads: Fetches<VesselLoads>,
     /// When to arrive by car, by terminal id; and how that advice has
@@ -497,12 +516,16 @@ impl App {
         let terminals: Vec<u32> = (self.service_routes.get(r))
             .map(|route| route.terminals.iter().copied().collect())
             .unwrap_or_default();
-        for t in terminals {
+        for &t in &terminals {
             self.want_advice(t);
         }
         let Some(id) = self.route_ids.get(r) else {
             return;
         };
+        for &t in &terminals {
+            let url = format!("api/v1/sailings?route={id}&terminal={t}");
+            self.sailings.want(&format!("{id}|{t}"), url);
+        }
         let url = format!("api/v1/stats/crossings?route={id}");
         self.crossings.want(id, url);
         self.schedules
@@ -515,6 +538,8 @@ impl App {
         let fresh = [
             self.crossings.receive("crossing times"),
             self.schedules.receive("schedule"),
+            self.sailings.receive("sailings"),
+            self.older_sailings.receive("older sailings"),
             self.route_loads.receive("car deck use"),
             self.vessel_loads.receive("boat's loads"),
             self.advice.receive("arrival advice"),
@@ -666,8 +691,15 @@ impl App {
                 self.vessel_loads.want(&id.to_string(), url);
             }
         }
+        self.want_older(target);
         let ids = &self.route_ids;
         let (crossings, schedules) = (&self.crossings, &self.schedules);
+        let sailings_of = &self.sailings;
+        let sailings = |r: usize, t: u32| {
+            ids.get(r).map_or(Loaded::Missing, |id| {
+                sailings_of.loaded(&format!("{id}|{t}"))
+            })
+        };
         let crossing = |r: usize| ids.get(r).and_then(|id| crossings.get(id));
         let schedule = |r: usize| {
             ids.get(r)
@@ -688,6 +720,7 @@ impl App {
             legs: &self.legs,
             crossings: &crossing,
             schedules: &schedule,
+            sailings: &sailings,
             vessel_loads: &vessel_load,
             route_loads: &route_load,
             advice: &terminal_advice,
@@ -696,7 +729,102 @@ impl App {
             date_clock: &date_clock,
         };
         let info = scope.info(target);
+        let older = self.older.as_ref().map(|view| {
+            let (pages, loading) = self.older_pages(view);
+            scope.older_page(view.title.clone(), &pages, loading)
+        });
         self.finder.set_info(&info);
+        self.finder.set_older(older.as_ref());
+    }
+
+    /// `view`'s pages in hand, and whether more are on their way.
+    fn older_pages(&self, view: &OlderView) -> (Vec<&RouteSailings>, bool) {
+        let mut pages = Vec::new();
+        let mut before = view.before_ms;
+        for _ in 0..view.pages {
+            let Some(id) = self.route_ids.get(view.route) else {
+                break;
+            };
+            let key = format!("{id}|{}|{before}", view.terminal);
+            let Some(page) = self.older_sailings.get(&key) else {
+                return (pages, true);
+            };
+            pages.push(page);
+            match page.sailings.last() {
+                Some(last) if page.more => before = last.departs_ms,
+                _ => break,
+            }
+        }
+        (pages, false)
+    }
+
+    /// Asks for what the page of older sailings needs; it closes if the
+    /// selection has moved on.
+    fn want_older(&mut self, target: Target) {
+        if self.older.as_ref().is_some_and(|v| v.target != target) {
+            self.older = None;
+        }
+        let Some(view) = &self.older else { return };
+        let Some(id) = self.route_ids.get(view.route).cloned() else {
+            return;
+        };
+        let (route_terminal, pages) = (format!("{id}|{}", view.terminal), view.pages);
+        let terminal = view.terminal;
+        let mut before = view.before_ms;
+        for _ in 0..pages {
+            let key = format!("{route_terminal}|{before}");
+            let url = format!(
+                "api/v1/sailings?route={id}&terminal={terminal}&before_ms={before}&limit={OLDER_PAGE}"
+            );
+            self.older_sailings.want(&key, url);
+            match self.older_sailings.get(&key) {
+                Some(page) if page.more => match page.sailings.last() {
+                    Some(last) => before = last.departs_ms,
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+    }
+
+    /// Opens the page of older sailings a "See older" button leads to.
+    fn open_older(&mut self, button: &Element) {
+        let number = |name: &str| {
+            button
+                .get_attribute(name)
+                .and_then(|v| v.parse::<i64>().ok())
+        };
+        let (Some(route), Some(terminal), Some(before_ms), Some(target)) = (
+            number("data-older-route"),
+            number("data-older-terminal"),
+            number("data-older-before"),
+            self.finder.entry().map(|e| e.target),
+        ) else {
+            return;
+        };
+        self.older = Some(OlderView {
+            target,
+            route: route as usize,
+            terminal: terminal as u32,
+            before_ms,
+            title: button.get_attribute("data-older-title").unwrap_or_default(),
+            pages: 1,
+        });
+        self.show_selection_info();
+    }
+
+    /// Back from the page of older sailings to the details.
+    fn close_older(&mut self) {
+        self.older = None;
+        self.show_selection_info();
+    }
+
+    /// The next page of older sailings.
+    fn more_older(&mut self) {
+        if let Some(view) = &mut self.older {
+            view.pages += 1;
+        }
+        self.show_selection_info();
     }
 
     fn draw_frame(&mut self) {

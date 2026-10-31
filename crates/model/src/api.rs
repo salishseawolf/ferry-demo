@@ -245,6 +245,54 @@ pub struct Stop {
     pub arrives_ms: Option<i64>,
 }
 
+/// `GET /sailings?route=…&terminal=…`: how a route's sailings from a terminal
+/// went. Without `before_ms`: the current trip day's so far, and any later
+/// sailing withdrawn. With it: the `limit` sailings before then, newest
+/// first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RouteSailings {
+    pub route: String,
+    pub terminal: u32,
+    pub sailings: Vec<SailingRecord>,
+    /// Whether there are older sailings than these.
+    pub more: bool,
+}
+
+/// A published sailing and how it went.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SailingRecord {
+    /// WSF's trip day, `2026-10-30`.
+    pub trip_date: String,
+    pub departs_ms: i64,
+    pub stops: Vec<u32>,
+    /// The boat as last published, and as first published.
+    pub vessel: String,
+    pub first_vessel: String,
+    pub outcome: SailingOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SailingOutcome {
+    /// A boat ran it, this many minutes after its time (early if negative).
+    Ran {
+        left_ms: i64,
+        vessel: String,
+        late_min: i32,
+    },
+    /// WSF has it as no boat's sailing, but a boat off the schedule left
+    /// around then for one of its stops.
+    OffSchedule { left_ms: i64, vessel: String },
+    /// WSF withdrew it, and nothing ran it.
+    Cancelled { withdrawn_ms: i64 },
+    /// Past its time, and it may yet go.
+    Due,
+    /// Still published, and no boat left for it while we were recording.
+    NoRecord,
+    /// We weren't recording then, so there's no telling.
+    Unknown,
+}
+
 /// Who a sailing takes on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -536,6 +584,23 @@ mod tests {
         let d: Destination =
             serde_json::from_str(r#"{"terminal":3,"drive_up":4,"oversold":false}"#).unwrap();
         assert_eq!(d.reservable, None);
+    }
+
+    #[test]
+    fn reads_sailing_records() {
+        let doc: RouteSailings = round_trip(
+            r#"{"route":"edmonds-kingston","terminal":12,"more":true,"sailings":[
+                {"trip_date":"2026-10-30","departs_ms":1793394600000,"stops":[8],
+                 "vessel":"Spokane","first_vessel":"Puyallup",
+                 "outcome":{"kind":"ran","left_ms":1793394700000,"vessel":"Spokane","late_min":2}},
+                {"trip_date":"2026-10-30","departs_ms":1793398200000,"stops":[8],
+                 "vessel":"Spokane","first_vessel":"Spokane","outcome":{"kind":"no_record"}}]}"#,
+        );
+        assert!(matches!(
+            doc.sailings[0].outcome,
+            SailingOutcome::Ran { late_min: 2, .. }
+        ));
+        assert_eq!(doc.sailings[1].outcome, SailingOutcome::NoRecord);
     }
 
     #[test]

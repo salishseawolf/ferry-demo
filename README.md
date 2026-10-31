@@ -8,6 +8,7 @@ A live map of Washington State Ferries on a 3D globe of Puget Sound, written in 
 - **Live boats:** every ferry's position, heading and wake every 10 seconds, drawn to scale on terrain and bathymetry.
 - **Schedules:** each terminal's and route's sailings for the day and at least the next 12 hours, with the next one held in view. Every published version is kept, so changes to the schedule can be compared with what was first promised.
 - **When to arrive:** a recommended arrival time by car for each sailing, estimated from how comparable sailings filled before, adjusted live when today is busier than usual, and falling back to WSF's own guidance where there's too little history.
+- **How sailings went:** each past sailing marked on time, late, off schedule or cancelled, with the boat that really ran it, and older ones a click away.
 - **Car deck use:** how full each sailing left, and by hour of the day on each route.
 - **Notices, crossing times and a finder** for boats, terminals and routes.
 
