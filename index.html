@@ -57,7 +57,7 @@
       .help { color: var(--muted); font-size: 12px; }
 
       /* Ferry names over the map, set like water names on Swiss maps;
-         web.rs places them. A paper halo keeps them legible over contours. */
+         web/labels.rs places them. A paper halo keeps them legible over contours. */
       #labels { position: fixed; inset: 0; overflow: hidden; pointer-events: none; }
       #labels span {
         position: absolute; left: 0; top: 0; white-space: nowrap;
@@ -66,7 +66,7 @@
       }
       #labels span.idle { color: #4f5864; }
       /* A name away from its first choice of place is led back to its
-         symbol by a hairline (web.rs Labels, placement.rs). */
+         symbol by a hairline (web/labels.rs, placement.rs). */
       #labels .leader {
         position: absolute; left: 0; top: 0; height: 1px; transform-origin: 0 50%;
         background: #1d2733; box-shadow: 0 0 0 1px rgba(247, 245, 238, 0.75);
@@ -90,16 +90,16 @@
         border: 1.5px solid var(--mark); background: rgba(176, 20, 106, 0.08);
         font: 600 9px/1 var(--mono); color: var(--mark); padding: 1px 2px;
       }
-      /* Faded back while a route is highlighted (web.rs DIM_ALPHA). */
+      /* Faded back while a route is highlighted (web/mod.rs DIM_ALPHA). */
       #labels span.dim, #notes .note.dim { opacity: 0.8; }
       /* Terminals are places: upright capitals, apart from boats' italics. */
       #labels span.terminal {
         font: 600 10.5px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
         color: #3b4757;
       }
-      /* Notice dots (web.rs Notes): ink buttons at a symbol's upper right,
+      /* Notice dots (web/notes.rs): ink buttons at a symbol's upper right,
          each opening a paper panel of WSF's notice on hover, focus or click.
-         The dot is to scale with the terrain: web.rs sets its diameter,
+         The dot is to scale with the terrain: web/notes.rs sets its diameter,
          --dot, and everything on it is a share of that. The panel's text
          stays readable at any zoom, and its corner tucks under the dot, so
          the pointer can cross from one to the other without losing hover. */
@@ -156,7 +156,7 @@
       .round:focus-visible, .tool:focus-visible, .chip:focus-within, .switch:focus-within, .handle:focus-visible, .copy-button:focus-visible {
         outline: 2px solid var(--mark); outline-offset: 2px;
       }
-      /* The matches fold up when the finder closes (web.rs: a click
+      /* The matches fold up when the finder closes (web/setup.rs: a click
          outside it, or Enter), and down when it opens. */
       #finder-drop {
         display: grid; grid-template-rows: 0fr; overflow: hidden; visibility: hidden;
@@ -263,7 +263,7 @@
       #finder-list .when { color: var(--muted); font: 11px/1.3 var(--mono); }
       #finder-list .bulletins p { margin: 4px 0 0; white-space: pre-line; font-size: 12.5px; }
 
-      /* Map settings (web.rs), opened by the button beside the search. */
+      /* Map settings (web/mod.rs), opened by the button beside the search. */
       #settings {
         position: fixed; top: calc(var(--top) + 52px); left: calc(var(--left) + min(400px, calc(100vw - 24px)) - 290px);
         width: 290px; max-height: calc(100dvh - var(--top) - 70px); overflow-y: auto; padding: 14px; z-index: 3;
@@ -284,7 +284,7 @@
       .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--paper); transition: left 0.15s ease; }
       .switch input:checked { background: var(--mark); }
       .switch input:checked::after { left: 17px; }
-      /* Tools you switch on, such as measuring (web.rs set_measuring). */
+      /* Tools you switch on, such as measuring (web/measuring.rs). */
       .tool {
         display: flex; align-items: center; justify-content: space-between; width: 100%;
         padding: 8px 10px; font: 600 13px/1 var(--sans); background: var(--paper);
@@ -314,7 +314,7 @@
       }
       #dock > * { padding: 10px 12px; }
       /* The ferry, terminal or route under the pointer, one fact per line
-         (web.rs); there only while there's one. */
+         (web/ferries.rs); there only while there's one. */
       #hud-vessel { font-size: 12.5px; white-space: pre-line; font-variant-numeric: tabular-nums; }
       #hud-vessel:empty { display: none; }
       @media (hover: none) { #hud-vessel { display: none; } }
@@ -332,7 +332,7 @@
       /* After copying, the clipboard icon briefly becomes a check mark. */
       .copy-button .check, .copy-button.copied .clip { display: none; }
       .copy-button.copied .check { display: block; color: #1f6d4a; }
-      /* The debug panel (the debug switch), filled in by web.rs. */
+      /* The debug panel (the debug switch), filled in by web/debug.rs. */
       #perf {
         position: fixed; right: var(--right); bottom: calc(var(--bottom) + 30px); width: min(320px, calc(100vw - 24px));
         max-height: calc(100dvh - var(--top) - var(--bottom) - 90px);
@@ -362,7 +362,7 @@
       #error[hidden] { display: none; }
 
       /* Phones: the search bar spans the top, settings drop below it, the
-         matches and details are a sheet at the bottom (web.rs sets its
+         matches and details are a sheet at the bottom (web/ sets its
          height: .sheet-peek, -half or -full on #finder), and the credits
          ride above the sheet. */
       @media (max-width: 700px) {
@@ -376,7 +376,7 @@
           box-shadow: 0 -3px 0 rgba(19, 34, 43, 0.12); transition: height 0.25s ease;
         }
         #finder.matched #finder-drop { display: flex; }
-        /* web.rs SHEET_PEEK_PX and SHEET_HALF_SHARE mirror these, to fit
+        /* web/fit.rs SHEET_PEEK_PX and SHEET_HALF_SHARE mirror these, to fit
            views above the sheet: change them together. */
         #finder.sheet-peek #finder-drop { height: calc(124px + var(--bottom)); }
         #finder.sheet-half #finder-drop { height: 52dvh; }
@@ -392,7 +392,7 @@
         #finder.matched.sheet-peek ~ #credits { bottom: calc(124px + var(--bottom) + 4px); }
         #finder.matched.sheet-half ~ #credits { bottom: calc(52dvh + 4px); }
         #dock { top: calc(var(--top) + 52px); bottom: auto; left: var(--left); right: var(--right); width: auto; }
-        /* Two lines, the rest a tap away (web.rs toggles .open). */
+        /* Two lines, the rest a tap away (web/setup.rs toggles .open). */
         #credits { pointer-events: auto; cursor: pointer; }
         #credits:not(.open) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
         /* Hung from the top here, so a fixed height keeps its foot still. */
@@ -425,7 +425,7 @@
     </div>
     <div id="settings" class="paper" role="dialog" aria-label="Map settings" hidden>
       <h2>Map style</h2>
-      <!-- Values match STYLE_CHOICES in web.rs. -->
+      <!-- Values match STYLE_CHOICES in web/mod.rs. -->
       <div class="chips" role="radiogroup" aria-label="Map style">
         <label class="chip"><input type="radio" name="style" value="cartographic" checked /> Cartographic</label>
         <label class="chip"><input type="radio" name="style" value="hypsometric" /> Height colors</label>

@@ -221,7 +221,7 @@ fn anchor(ink: &str) -> String {
     )
 }
 
-/// A notice dot, as web.rs places it over the map (#notes in index.html).
+/// A notice dot, as web/notes.rs places it over the map (#notes in index.html).
 fn notice(ink: &str, paper: &str) -> String {
     format!(
         "<circle cx=\"13\" cy=\"7\" r=\"5.5\" fill=\"{ink}\" stroke=\"{paper}\" \
