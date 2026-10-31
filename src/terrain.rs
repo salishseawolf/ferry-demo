@@ -123,10 +123,14 @@ pub const HEIGHT_TILE_PX: u32 = TILE_PX + 2 * BORDER_PX;
 /// water width and water fraction (see tools/tiles/elevation.py). Decoded here rather
 /// than by the browser, which might color-manage or premultiply them.
 pub fn decode_tile(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decoder = png::Decoder::new(png_bytes);
+    // The decoder reads from something it can seek in.
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
     decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let size = reader
+        .output_buffer_size()
+        .ok_or("tile too large to decode")?;
+    let mut buf = vec![0; size];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     if info.width != HEIGHT_TILE_PX || info.height != HEIGHT_TILE_PX {
         return Err(format!("tile is {}x{} px", info.width, info.height));

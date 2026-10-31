@@ -24,7 +24,7 @@ glam = { workspace = true, features = ["bytemuck"] }
 h3o = "0.11"
 js-sys = "0.3.106"
 log = "0.4"
-png = "0.17"
+png = "0.18"
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = "0.2.129"
