@@ -26,6 +26,11 @@ const FACING_MEMORY: f64 = 20.0;
 /// LeftDock from the same terminal within this many minutes of an open
 /// trip's is that trip, leaving later.
 const RELEFT_MINUTES: i32 = 10;
+/// A boat with no LeftDock leaving more than this many minutes before the
+/// scheduled departure WSF shows isn't that sailing: it's catching up, and
+/// the sailing is still to come. (Boats WSF gives a LeftDock leave at most
+/// two minutes early.)
+const EARLIEST_MINUTES: i32 = 5;
 /// Raw answers read at a time by `rebuild`.
 const REBUILD_PAGE: i64 = 200;
 
@@ -96,8 +101,9 @@ async fn apply_vessels(
             // Under way: the trip it's on (its open one from here, if it
             // left lately: see RELEFT_MINUTES), with WSF's latest estimate.
             // A boat off the schedule may name no destination: it's filled
-            // in when the boat docks.
-            (false, Some(left), Some(from), to) => {
+            // in when the boat docks. A boat out of service isn't sailing,
+            // whatever its LeftDock (which can be days old).
+            (false, Some(left), Some(from), to) if v.in_service => {
                 let moved = sqlx::query(
                     "UPDATE trips SET
                          left_dock = GREATEST(left_dock, to_timestamp($3::double precision / 1000)),
@@ -145,15 +151,68 @@ async fn apply_vessels(
                     .await?;
                 }
             }
-            // Docked: the end of its latest open trip to here, or to
-            // somewhere unnamed from elsewhere (WSF names the terminal it's
-            // at as the one it leaves next). An unnamed one from here went
-            // nowhere (a boat shifting berths): it's dropped.
+            // Under way with no LeftDock: WSF gives none to a boat running
+            // off the schedule, as boats catching up after a delay do. The
+            // trip it's on, or one leaving when it's first seen moving; off
+            // the schedule unless it could be the sailing WSF shows.
+            (false, None, Some(from), to) if v.in_service && v.speed_kn >= MOVING_KN => {
+                let on_trip = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "UPDATE trips SET
+                         arriving = COALESCE($4, arriving),
+                         scheduled_departure = CASE
+                             WHEN to_timestamp($5::double precision / 1000) - left_dock
+                                 <= make_interval(mins => $7)
+                             THEN to_timestamp($5::double precision / 1000)
+                             ELSE scheduled_departure END,
+                         eta = COALESCE(to_timestamp($6::double precision / 1000), eta)
+                     WHERE id = (
+                         SELECT id FROM trips
+                         WHERE vessel_id = $2 AND departing = $3 AND arrived_at IS NULL
+                           AND left_dock > {AT} - interval '6 hours'
+                         ORDER BY left_dock DESC LIMIT 1)"
+                )))
+                .bind(v.reported_ms)
+                .bind(v.id as i32)
+                .bind(from as i32)
+                .bind(to.map(|t| t as i32))
+                .bind(v.scheduled_departure_ms)
+                .bind(v.eta_ms)
+                .bind(EARLIEST_MINUTES)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected();
+                if on_trip == 0 {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "INSERT INTO trips (left_dock, vessel_id, departing, arriving,
+                             scheduled_departure, eta)
+                         VALUES ({AT}, $2, $3, $4,
+                             CASE WHEN to_timestamp($5::double precision / 1000) - {AT}
+                                     <= make_interval(mins => $7)
+                                 THEN to_timestamp($5::double precision / 1000) END,
+                             to_timestamp($6::double precision / 1000))
+                         ON CONFLICT (vessel_id, left_dock) DO NOTHING"
+                    )))
+                    .bind(v.reported_ms)
+                    .bind(v.id as i32)
+                    .bind(from as i32)
+                    .bind(to.map(|t| t as i32))
+                    .bind(v.scheduled_departure_ms)
+                    .bind(v.eta_ms)
+                    .bind(EARLIEST_MINUTES)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+            }
+            // Docked: the end of its latest open trip from elsewhere,
+            // wherever WSF said it was going (it stops on the way, or goes
+            // somewhere else when it's catching up; WSF names the terminal
+            // it's at as the one it leaves next). An open trip from here
+            // went nowhere (a boat shifting berths, or easing out and back):
+            // it's dropped, and the trip starts when it leaves again.
             (true, _, Some(here), _) => {
                 sqlx::query(
                     "DELETE FROM trips
-                     WHERE vessel_id = $1 AND arrived_at IS NULL
-                       AND arriving IS NULL AND departing = $2",
+                     WHERE vessel_id = $1 AND arrived_at IS NULL AND departing = $2",
                 )
                 .bind(v.id as i32)
                 .bind(here as i32)
@@ -164,7 +223,7 @@ async fn apply_vessels(
                      WHERE id = (
                          SELECT id FROM trips
                          WHERE vessel_id = $2 AND arrived_at IS NULL
-                           AND (arriving = $3 OR (arriving IS NULL AND departing <> $3))
+                           AND departing <> $3
                            AND left_dock < {AT} AND left_dock > {AT} - interval '6 hours'
                          ORDER BY left_dock DESC LIMIT 1)"
                 )))
@@ -570,6 +629,166 @@ mod tests {
             trips,
             [(7, Some(4), Some(4700.0), true), (4, Some(7), None, false)]
         );
+        db.finish().await;
+    }
+
+    /// The trips from answers in turn: (from, to, left, arrived, unscheduled).
+    async fn trips_from(
+        pool: &PgPool,
+        answers: &[(i64, serde_json::Value)],
+    ) -> Vec<(i32, Option<i32>, f64, Option<f64>, bool)> {
+        for (at_s, body) in answers {
+            let path = "vessels/rest/vessellocations";
+            crate::db::insert_raw(pool, path, at_s * 1000, Some(200), Some(body), None)
+                .await
+                .unwrap();
+        }
+        rebuild(pool).await.unwrap();
+        sqlx::query_as(
+            "SELECT departing, arriving, extract(epoch FROM left_dock)::float8,
+                 extract(epoch FROM arrived_at)::float8, unscheduled
+             FROM trips ORDER BY left_dock",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// `position`, off the schedule: WSF gives no LeftDock or scheduled
+    /// departure.
+    fn off_schedule(at_s: i64, at_dock: bool, departing: u32, arriving: u32) -> serde_json::Value {
+        let mut answer = position(at_s, -122.5, at_dock, departing, arriving, None);
+        answer[0]["LeftDock"] = serde_json::Value::Null;
+        answer[0]["ScheduledDeparture"] = serde_json::Value::Null;
+        answer
+    }
+
+    #[tokio::test]
+    async fn records_a_boat_running_off_the_schedule() {
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        // Cathlamet's Friday afternoon, catching up: WSF gives no LeftDock
+        // and names Southworth (20) while it's bound for Fauntleroy (9).
+        // Then it goes on to Vashon (22), which is named, and on again.
+        let answers = [
+            (1000, off_schedule(1000, true, 22, 20)),
+            (1100, off_schedule(1100, false, 22, 20)),
+            (1110, off_schedule(1110, false, 22, 20)),
+            (2000, off_schedule(2000, true, 9, 22)),
+            (2500, off_schedule(2500, false, 9, 22)),
+            (3400, off_schedule(3400, true, 22, 9)),
+            (3500, off_schedule(3500, false, 22, 9)),
+        ];
+        assert_eq!(
+            trips_from(&db.pool, &answers).await,
+            [
+                (22, Some(9), 1100.0, Some(2000.0), true),
+                (9, Some(22), 2500.0, Some(3400.0), true),
+                (22, Some(9), 3500.0, None, true),
+            ]
+        );
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_trip_ends_at_the_first_dock_it_reaches() {
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        // Bound for Fauntleroy (9) by way of Southworth (20): two legs.
+        let answers = [
+            (1070, position(1070, -122.4, false, 22, 9, None)),
+            (2000, off_schedule(2000, true, 20, 9)),
+            (2500, off_schedule(2500, false, 20, 9)),
+            (3000, off_schedule(3000, true, 9, 22)),
+        ];
+        assert_eq!(
+            trips_from(&db.pool, &answers).await,
+            [
+                (22, Some(20), 1060.0, Some(2000.0), false),
+                (20, Some(9), 2500.0, Some(3000.0), true),
+            ]
+        );
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_boat_catching_up_is_not_the_sailing_it_left_well_ahead_of() {
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        let scheduled = |mut answer: serde_json::Value, s: i64| {
+            answer[0]["ScheduledDeparture"] = format!("/Date({}-0700)/", s * 1000).into();
+            answer
+        };
+        // It leaves 27 minutes before the sailing WSF shows, which stays
+        // off the trip however often it's shown. It then docks and leaves
+        // a minute ahead of the next: that one it is.
+        let answers = [
+            (1000, scheduled(off_schedule(1000, false, 22, 9), 2620)),
+            (1010, scheduled(off_schedule(1010, false, 22, 9), 2620)),
+            (2000, off_schedule(2000, true, 9, 22)),
+            (3000, scheduled(off_schedule(3000, false, 9, 22), 3060)),
+        ];
+        assert_eq!(
+            trips_from(&db.pool, &answers).await,
+            [
+                (22, Some(9), 1000.0, Some(2000.0), true),
+                (9, Some(22), 3000.0, None, false),
+            ]
+        );
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_false_start_is_not_a_trip() {
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        // Tillikum eases out of Friday Harbor (10) with a LeftDock, docks
+        // there again, and leaves half an hour later.
+        let left_later = |mut answer: serde_json::Value| {
+            answer[0]["LeftDock"] = "/Date(3000000-0700)/".into();
+            answer
+        };
+        let answers = [
+            (1070, position(1070, -122.4, false, 10, 15, None)),
+            (1200, position(1200, -122.4, true, 10, 15, None)),
+            (
+                3010,
+                left_later(position(3010, -122.4, false, 10, 15, None)),
+            ),
+            (6000, position(6000, -122.4, true, 15, 10, None)),
+        ];
+        assert_eq!(
+            trips_from(&db.pool, &answers).await,
+            [(10, Some(15), 3000.0, Some(6000.0), false)]
+        );
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_boat_in_service_and_moving_opens_a_trip() {
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        // Tacoma, laid up in Everett, with a LeftDock nine days old.
+        let mut laid_up = position(1070, -122.4, false, 138, 0, None);
+        laid_up[0]["InService"] = false.into();
+        // Kittitas, out of service and on its way from Eagle Harbor.
+        let mut moving_yard_boat = off_schedule(1080, false, 122, 0);
+        moving_yard_boat[0]["InService"] = false.into();
+        // A boat drifting off the dock with no LeftDock, not yet going.
+        let mut drifting = off_schedule(1090, false, 7, 4);
+        drifting[0]["Speed"] = 0.4.into();
+        let answers = [(1070, laid_up), (1080, moving_yard_boat), (1090, drifting)];
+        assert_eq!(trips_from(&db.pool, &answers).await, []);
         db.finish().await;
     }
 
