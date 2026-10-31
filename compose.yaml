@@ -16,6 +16,9 @@ x-dev: &dev
   working_dir: /src
   network_mode: service:db
   depends_on: [db]
+  # A tiny init as PID 1, which passes on the stop signal: cargo, trunk
+  # and Python as PID 1 ignore it, so each stop waited 10 s for a kill.
+  init: true
 
 services:
   db:
