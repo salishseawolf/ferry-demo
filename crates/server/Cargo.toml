@@ -3,6 +3,9 @@ name = "ferry-server"
 version = "0.1.0"
 edition = "2024"
 description = "The ferry-demo server: polls WSF, keeps history in Postgres, and serves the app's API."
+license-file = "../../LICENSE"
+# All rights reserved (LICENSE): not for crates.io.
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

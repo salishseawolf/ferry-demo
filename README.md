@@ -60,3 +60,7 @@ Every push to `main` that passes CI publishes the release images, with build pro
 - Typefaces: Source Serif 4, Overpass and Overpass Mono, under the SIL Open Font License (`assets/fonts/`)
 
 This project isn't affiliated with WSDOT or Washington State Ferries.
+
+## License
+
+Copyright (c) 2026 Thomas G Wolf. All rights reserved: see [LICENSE](LICENSE). The typefaces and the data sources above keep their own licenses.

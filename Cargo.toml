@@ -11,6 +11,9 @@ serde_json = "1.0.154"
 name = "ferry-demo"
 version = "0.1.0"
 edition = "2024"
+license-file = "LICENSE"
+# All rights reserved (LICENSE): not for crates.io.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

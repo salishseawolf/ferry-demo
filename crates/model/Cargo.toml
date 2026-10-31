@@ -3,6 +3,9 @@ name = "ferry-model"
 version = "0.1.0"
 edition = "2024"
 description = "Types and logic shared by the ferry-demo app and server: the API's documents, geodesy, and the route network."
+license-file = "../../LICENSE"
+# All rights reserved (LICENSE): not for crates.io.
+publish = false
 
 [dependencies]
 glam = { workspace = true }

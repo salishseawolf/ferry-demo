@@ -1,0 +1,16 @@
+Copyright (c) 2026 Thomas G Wolf. All rights reserved.
+
+This repository and its contents, including the source code, documentation
+and other materials, are the property of the copyright holder. No license,
+express or implied, is granted to use, copy, modify, merge, publish,
+distribute, sublicense or sell any part of it, except for the rights GitHub's
+Terms of Service give users of GitHub to view and fork public repositories
+on GitHub.
+
+Third-party materials included here keep their own licenses:
+
+- The typefaces in assets/fonts/ (Source Serif 4, Overpass and Overpass Mono)
+  are licensed under the SIL Open Font License 1.1; see the license files
+  beside them.
+- The ferry, map, elevation and land cover data the project uses belong to
+  their sources, credited in README.md, under their own terms.
