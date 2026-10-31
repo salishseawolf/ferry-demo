@@ -1,6 +1,7 @@
 //! The published schedule: each route's sailings for the trip day, from
 //! WSF's schedule service, served as `/schedule?route=…`. Fetched for each
-//! new trip day and again when WSF says its schedules changed.
+//! new trip day, and again (at most hourly) when WSF says its schedules
+//! changed.
 //!
 //! WSF lists a route's sailings per pair of terminals, so a boat calling
 //! at two more terminals appears under both pairs; they're merged here
@@ -23,6 +24,10 @@ use crate::wsf::{self, DaySchedule, Wsf};
 const CHECK: Duration = Duration::from_secs(600);
 /// After a failed load, try again this soon.
 const RETRY: Duration = Duration::from_secs(60);
+/// The soonest a moved flush date reloads the schedules again: it moves
+/// every few minutes, mostly without the schedules changing, and each load
+/// is a request per route.
+const RELOAD_MS: i64 = 3_600_000;
 /// Which of our routes each of WSF's goes with: the smallest that calls
 /// at all its terminals. WSF's without one are left out.
 pub fn assign<'a>(
@@ -134,10 +139,23 @@ pub fn build(route: &str, trip_date: &str, days: &[DaySchedule]) -> RouteSchedul
 }
 
 /// What a load was of: the trip day, and WSF's schedule flush date then.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Loaded {
     trip_date: String,
     flushed_ms: Option<i64>,
+    /// When it was loaded.
+    at_ms: i64,
+}
+
+/// Whether to load the schedules for `trip_date`, WSF's flush date being
+/// `flushed_ms`, at `now_ms`: the first time, on a new trip day, and when
+/// the flush date has moved, but not again within `RELOAD_MS`.
+fn due(loaded: Option<&Loaded>, trip_date: &str, flushed_ms: Option<i64>, now_ms: i64) -> bool {
+    match loaded {
+        None => true,
+        Some(l) if l.trip_date != trip_date => true,
+        Some(l) => l.flushed_ms != flushed_ms && now_ms - l.at_ms >= RELOAD_MS,
+    }
 }
 
 /// Fetches every route's schedule for `trip_date` and publishes them.
@@ -175,13 +193,17 @@ async fn load(pool: &PgPool, wsf: &Wsf, state: &AppState, trip_date: &str) -> Re
         .into_iter()
         .map(|(route, days)| (route.to_string(), build(route, trip_date, &days)))
         .collect();
-    tracing::info!(trip_date, routes = schedules.len(), "schedules loaded");
-    state.set_schedules(schedules);
+    if state.schedules_today().as_deref() == Some(&schedules) {
+        tracing::debug!(trip_date, "schedules unchanged");
+    } else {
+        tracing::info!(trip_date, routes = schedules.len(), "schedules loaded");
+        state.set_schedules(schedules);
+    }
     Ok(())
 }
 
 /// Keeps the schedules current: loads them for each new trip day, and
-/// again when WSF's schedule flush date moves.
+/// again when WSF's schedule flush date moves (see `due`).
 pub fn spawn(pool: PgPool, wsf: Arc<Wsf>, state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut loaded: Option<Loaded> = None;
@@ -193,13 +215,15 @@ pub fn spawn(pool: PgPool, wsf: Arc<Wsf>, state: Arc<AppState>) {
                     None
                 }
             };
+            let now_ms = wsf::now_ms();
             let want = Loaded {
-                trip_date: trip_date(wsf::now_ms()),
+                trip_date: trip_date(now_ms),
                 // Unknown (the check failed): as last time, so only a new
                 // day reloads.
                 flushed_ms: flushed_ms.or(loaded.as_ref().and_then(|l| l.flushed_ms)),
+                at_ms: now_ms,
             };
-            let wait = if loaded.as_ref() == Some(&want) {
+            let wait = if !due(loaded.as_ref(), &want.trip_date, want.flushed_ms, now_ms) {
                 CHECK
             } else {
                 match load(&pool, &wsf, &state, &want.trip_date).await {
@@ -224,6 +248,24 @@ mod tests {
     use crate::wsf::{PairSailing, PairSailings};
 
     const MIN_MS: i64 = 60_000;
+
+    #[test]
+    fn reloads_for_a_new_day_and_at_most_hourly_for_a_new_flush_date() {
+        let loaded = Loaded {
+            trip_date: "2026-10-30".to_string(),
+            flushed_ms: Some(1_000),
+            at_ms: 0,
+        };
+        let at = |min: i64| min * MIN_MS;
+        assert!(due(None, "2026-10-30", None, 0));
+        // Nothing moved.
+        assert!(!due(Some(&loaded), "2026-10-30", Some(1_000), at(600)));
+        // The flush date moved: not within the hour, then yes.
+        assert!(!due(Some(&loaded), "2026-10-30", Some(2_000), at(10)));
+        assert!(due(Some(&loaded), "2026-10-30", Some(2_000), at(60)));
+        // A new day at once, whatever the flush date.
+        assert!(due(Some(&loaded), "2026-10-31", Some(1_000), at(10)));
+    }
 
     #[test]
     fn matches_wsf_routes_to_ours() {
