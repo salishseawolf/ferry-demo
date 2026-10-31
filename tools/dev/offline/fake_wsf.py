@@ -9,9 +9,17 @@ boats stay where they were. Schedule paths answer for whatever day is
 asked with two routes: Fauntleroy / Vashon / Southworth, from WSF's
 published fall 2026 times (Southworth's own sailings are made up), and
 Edmonds / Kingston, made up, every 40 minutes.
+
+FAKE_WSF_DROP lists what WSF has stopped publishing, to try a route or leg
+with no sailings: "6" for WSF's route 6, "13:20" for the route's sailings
+from terminal 20, "13:9>20" for its leg from 9 to 20.
+
+FAKE_WSF_FLUSH_MOVES=1 moves the schedule flush date at every look, as WSF's
+does, to try how the server reloads.
 """
 
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +27,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ANSWERS = Path(__file__).parent / "answers"
+DROP = os.environ.get("FAKE_WSF_DROP", "").split()
+FLUSH_MOVES = os.environ.get("FAKE_WSF_FLUSH_MOVES") == "1"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 VESSELS = {"Kitsap": 6, "Cathlamet": 1, "Salish": 66, "Walla Walla": 36, "Spokane": 32}
@@ -103,7 +113,13 @@ def schedule(day, route):
             combo(day, 13, 20, 22, [], SOUTHWORTH, 15),
             combo(day, 13, 20, 9, [], SOUTHWORTH, 35),
         ]
+    combos = [c for c in combos if not dropped(route, c)]
     return head | {"TerminalCombos": combos}
+
+
+def dropped(route, combo):
+    leg = f"{route}:{combo['DepartingTerminalID']}"
+    return leg in DROP or f"{leg}>{combo['ArrivingTerminalID']}" in DROP
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,10 +127,12 @@ class Handler(BaseHTTPRequestHandler):
         parts = self.path.split("?")[0].removeprefix("/ferries/api/").strip("/").split("/")
         body = None
         if parts == ["schedule", "rest", "cacheflushdate"]:
-            today = datetime.now(PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0)
-            body = json.dumps(wsf_date(today))
+            flushed = datetime.now(PACIFIC)
+            if not FLUSH_MOVES:
+                flushed = flushed.replace(hour=0, minute=0, second=0, microsecond=0)
+            body = json.dumps(wsf_date(flushed))
         elif parts[:3] == ["schedule", "rest", "routes"] and len(parts) == 4:
-            body = json.dumps([{"RouteID": 13}, {"RouteID": 6}])
+            body = json.dumps([{"RouteID": r} for r in (13, 6) if str(r) not in DROP])
         elif parts[:3] == ["schedule", "rest", "schedule"] and len(parts) == 5:
             body = json.dumps(schedule(date.fromisoformat(parts[3]), int(parts[4])))
         else:

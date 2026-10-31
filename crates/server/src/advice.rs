@@ -22,7 +22,7 @@
 //! for drive-ups, which rises as well as falls as reservations are held
 //! and released, so it's taken as it is.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use ferry_model::api::{
@@ -574,49 +574,60 @@ fn gap_after(departures: &[(i64, Vec<u32>)], destination: u32, departs_ms: i64) 
         .fold(LAST_SAILING_GAP_MIN, f64::min)
 }
 
-/// `terminal`'s sailings in the trip day's schedules: the trip day, and
-/// each sailing's time and stops, in order.
-fn departures_from(
+/// `terminal`'s sailings in the schedules, trip day by trip day: each
+/// sailing's time and stops, in order. Days with none are left out.
+fn departures_by_day(
     schedules: &HashMap<String, ferry_model::api::RouteSchedule>,
     terminal: u32,
-) -> (String, Vec<(i64, Vec<u32>)>) {
-    let mut departures: Vec<(i64, Vec<u32>)> = Vec::new();
-    let mut trip_date = String::new();
-    for s in schedules.values() {
-        trip_date.clone_from(&s.trip_date);
-        for t in s.terminals.iter().filter(|t| t.terminal == terminal) {
-            departures.extend(
+) -> Vec<Vec<(i64, Vec<u32>)>> {
+    let mut days: BTreeMap<&str, Vec<(i64, Vec<u32>)>> = BTreeMap::new();
+    for day in schedules.values().flat_map(|s| &s.days) {
+        for t in day.terminals.iter().filter(|t| t.terminal == terminal) {
+            days.entry(&day.trip_date).or_default().extend(
                 t.departures
                     .iter()
                     .map(|d| (d.departs_ms, d.stops.iter().map(|s| s.terminal).collect())),
             );
         }
     }
-    departures.sort_by_key(|(ms, _)| *ms);
-    departures.dedup_by_key(|(ms, _)| *ms);
-    (trip_date, departures)
+    days.into_values()
+        .map(|mut departures| {
+            departures.sort_by_key(|(ms, _)| *ms);
+            departures.dedup_by_key(|(ms, _)| *ms);
+            departures
+        })
+        .collect()
 }
 
-/// Advice for each of `terminal`'s `departures` on `trip_date`, from the
-/// record of its sailings (`records`), as of `now_ms`.
+/// Advice for each of `terminal`'s sailings, `days` being its departures
+/// trip day by trip day, from the record of its sailings (`records`), as of
+/// `now_ms`. Each day apart: its last sailing is the last one, however soon
+/// the next day's first.
 fn advise_terminal(
     terminal: u32,
-    trip_date: String,
-    departures: &[(i64, Vec<u32>)],
+    days: &[Vec<(i64, Vec<u32>)>],
     records: &[Recorded],
     special: &HashMap<i64, String>,
     now_ms: i64,
 ) -> TerminalAdvice {
     let reservations = reservation_advice(terminal).is_some();
-    let sailings = departures
-        .iter()
-        .map(|(departs_ms, stops)| {
+    let mut sailings = Vec::new();
+    for departures in days {
+        // A later day learns only from sailings that have left, not from
+        // today's still filling.
+        let first_ms = departures.first().map_or(i64::MAX, |(ms, _)| *ms);
+        let settled: Vec<Recorded> = records
+            .iter()
+            .filter(|r| r.departs_ms < now_ms || r.departs_ms >= first_ms)
+            .cloned()
+            .collect();
+        sailings.extend(departures.iter().map(|(departs_ms, stops)| {
             let holiday = unusual(calendar::pacific_day(*departs_ms), special);
-            let advice = if records.is_empty() {
+            let advice = if settled.is_empty() {
                 guidance(*departs_ms, reservations, holiday.is_some(), false)
             } else {
                 advise_sailing(
-                    records,
+                    &settled,
                     departures,
                     *departs_ms,
                     stops,
@@ -631,11 +642,10 @@ fn advise_terminal(
                 advice,
                 holiday,
             }
-        })
-        .collect();
+        }));
+    }
     TerminalAdvice {
         terminal,
-        trip_date,
         reservation: reservation_advice(terminal),
         sailings,
     }
@@ -737,31 +747,32 @@ impl Book {
 /// counts come.
 pub const PUBLISH_EVERY_MS: i64 = 60_000;
 
-/// Works out every terminal's advice for the trip day as of `now_ms`,
-/// publishes it, and records what changed (`advice_given`). False, doing
-/// nothing, before the trip day's schedules have loaded.
+/// Works out every terminal's advice for the published schedule as of
+/// `now_ms`, publishes it, and records what changed (`advice_given`). False,
+/// doing nothing, before the schedules have loaded.
 pub async fn publish(
     pool: &PgPool,
     state: &AppState,
     book: &mut Book,
     now_ms: i64,
 ) -> Result<bool> {
-    let Some(schedules) = state.schedules_today() else {
+    let Some(schedules) = state.route_schedules() else {
         return Ok(false);
     };
     book.refresh(pool).await?;
     let special = special_days(pool).await?;
     let mut terminals: Vec<u32> = schedules
         .values()
-        .flat_map(|s| s.terminals.iter().map(|t| t.terminal))
+        .flat_map(|s| &s.days)
+        .flat_map(|d| d.terminals.iter().map(|t| t.terminal))
         .collect();
     terminals.sort_unstable();
     terminals.dedup();
     let mut docs = HashMap::new();
     for terminal in terminals {
-        let (trip_date, departures) = departures_from(&schedules, terminal);
+        let days = departures_by_day(&schedules, terminal);
         let records = book.records(pool, terminal, now_ms).await?;
-        let advice = advise_terminal(terminal, trip_date, &departures, &records, &special, now_ms);
+        let advice = advise_terminal(terminal, &days, &records, &special, now_ms);
         record_given(pool, &advice, now_ms).await?;
         docs.insert(terminal, Doc::json(&advice));
     }
@@ -1159,13 +1170,15 @@ mod tests {
             "seattle-bainbridge-island".to_string(),
             ferry_model::api::RouteSchedule {
                 route: "seattle-bainbridge-island".into(),
-                trip_date: "2026-10-30".into(),
-                season: "Fall 2026".into(),
-                pdf_url: None,
-                terminals: vec![ferry_model::api::TerminalDepartures {
-                    terminal: 7,
-                    departures: vec![departure(five_ten), departure(five_55)],
-                    notes: vec![],
+                days: vec![ferry_model::api::ScheduleDay {
+                    trip_date: "2026-10-30".into(),
+                    season: "Fall 2026".into(),
+                    pdf_url: None,
+                    terminals: vec![ferry_model::api::TerminalDepartures {
+                        terminal: 7,
+                        departures: vec![departure(five_ten), departure(five_55)],
+                        notes: vec![],
+                    }],
                 }],
             },
         )]));
@@ -1205,10 +1218,10 @@ mod tests {
         let mut book = Book::default();
         publish(pool, &state, &mut book, noon).await.unwrap();
         assert_eq!(book.history[&7].1.len(), 6);
-        let schedules = state.schedules_today().unwrap();
-        let (trip_date, departures) = departures_from(&schedules, 7);
+        let schedules = state.route_schedules().unwrap();
+        let days = departures_by_day(&schedules, 7);
         let records = book.records(pool, 7, noon).await.unwrap();
-        let advice = advise_terminal(7, trip_date, &departures, &records, &HashMap::new(), noon);
+        let advice = advise_terminal(7, &days, &records, &HashMap::new(), noon);
         assert_eq!(advice.reservation, None);
         assert_eq!(advice.sailings.len(), 2);
         let Advice::ArriveBy {
@@ -1282,5 +1295,82 @@ mod tests {
         assert_eq!(pace(&pasts, 60.0, 20.0), Some(1.5));
         assert_eq!(pace(&pasts, 2.0, 38.0), None);
         assert!((recency_weight(28.0) - 0.5).abs() < 1e-12);
+    }
+
+    /// A route's schedule with `terminal`'s day of sailings at these times.
+    fn day_of(trip_date: &str, terminal: u32, times: &[i64]) -> ferry_model::api::ScheduleDay {
+        ferry_model::api::ScheduleDay {
+            trip_date: trip_date.into(),
+            season: "Fall 2026".into(),
+            pdf_url: None,
+            terminals: vec![ferry_model::api::TerminalDepartures {
+                terminal,
+                departures: times
+                    .iter()
+                    .map(|&departs_ms| ferry_model::api::Departure {
+                        departs_ms,
+                        vessel_id: Some(1),
+                        vessel: "Sealth".into(),
+                        stops: vec![ferry_model::api::Stop {
+                            terminal: 3,
+                            arrives_ms: None,
+                        }],
+                        loading: ferry_model::api::Loading::Both,
+                        notes: vec![],
+                    })
+                    .collect(),
+                notes: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_days_last_sailing_stays_the_last_whatever_the_next_day_holds() {
+        const MIN: i64 = 60_000;
+        let schedules = HashMap::from([(
+            "r".to_string(),
+            ferry_model::api::RouteSchedule {
+                route: "r".into(),
+                days: vec![
+                    day_of("2026-10-30", 7, &[100 * MIN, 200 * MIN]),
+                    day_of("2026-10-31", 7, &[230 * MIN]),
+                ],
+            },
+        )]);
+        let days = departures_by_day(&schedules, 7);
+        assert_eq!(days.len(), 2);
+        // Only 30 minutes before the next day's first, but tonight's last.
+        assert_eq!(gap_after(&days[0], 3, 200 * MIN), LAST_SAILING_GAP_MIN);
+        assert_eq!(gap_after(&days[0], 3, 100 * MIN), 100.0);
+        // A terminal with nothing published has no days.
+        assert!(departures_by_day(&schedules, 99).is_empty());
+    }
+
+    #[test]
+    fn the_next_days_advice_ignores_sailings_still_filling() {
+        // It's noon. Today's 5:00 hasn't left and is near empty so far; it's
+        // all the record there is. Today's own advice may use it, but
+        // tomorrow's has nothing to go on, so gives WSF's guidance.
+        let noon = 1_793_386_800_000; // 2026-10-30, 12:00 PDT
+        let later = noon + 5 * calendar::HOUR_MS;
+        let tomorrow = later + calendar::DAY_MS;
+        let records = [Recorded {
+            departs_ms: later,
+            minute: calendar::pacific_minute(later),
+            destination: 3,
+            past: Past {
+                day: calendar::pacific_day(later),
+                capacity: 200,
+                counts: vec![],
+                counted_to_min: 300.0,
+            },
+            reservations: false,
+        }];
+        let days = [vec![(tomorrow, vec![3])]];
+        let advice = advise_terminal(7, &days, &records, &HashMap::new(), noon);
+        let Advice::Guidance { counted, .. } = &advice.sailings[0].advice else {
+            panic!("{:?}", advice.sailings[0].advice);
+        };
+        assert!(!counted, "nothing that's left should have been considered");
     }
 }

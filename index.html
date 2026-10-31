@@ -192,6 +192,17 @@
          rows scroll; the last two sailings gone (faded) lead into the next,
          footnote numbers in magenta. */
       #finder-list .caption { color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+      /* All of a match's schedules, set off from its other details. */
+      #finder-list .schedules { margin-top: 12px; padding: 8px; border: 1px solid var(--rule); }
+      #finder-list .schedules .leg:first-child { margin-top: 0; }
+      /* Each leg's schedule: its heading between the section labels and the
+         match's name in weight, and a rule heavier than the timetable's own
+         between one leg and the next. */
+      #finder-list .leg h3 {
+        padding: 5px 6px; background: var(--tint);
+        font: 700 12.5px/1.3 var(--mono); letter-spacing: 0.06em; color: var(--ink);
+      }
+      #finder-list .leg + .leg { margin-top: 16px; padding-top: 14px; border-top: 2px solid var(--ink); }
       #finder-list .timetable {
         --head: 22px;
         margin: 0; padding: 0; list-style: none; max-height: 218px; overflow-y: auto;
@@ -208,6 +219,11 @@
         font: 600 10px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
       }
       #finder-list .timetable .head span:last-child { text-align: right; }
+      /* Where the next trip day starts, as on WSF's printed schedules. */
+      #finder-list .timetable .day {
+        display: block; padding-block: 10px 5px; border-top: 1.5px solid var(--ink);
+        font: 600 10px/1.3 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+      }
       #finder-list .timetable .departs { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       #finder-list .timetable .time { font: 600 12.5px/1 var(--mono); }
       #finder-list .timetable .to { font-size: 11.5px; color: var(--muted); }

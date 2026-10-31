@@ -72,7 +72,7 @@ type AdviceDocs = HashMap<u32, Arc<Doc>>;
 pub struct AppState {
     network: RwLock<Option<Arc<Doc>>>,
     vessels: RwLock<Option<Arc<Doc>>>,
-    /// Each route's schedule for the trip day, by route id, once loaded:
+    /// Each route's schedule, by route id, once loaded:
     /// as served, and as data (for advice).
     schedules: RwLock<Option<Arc<Schedules>>>,
     schedule_data: RwLock<Option<Arc<HashMap<String, RouteSchedule>>>>,
@@ -112,8 +112,8 @@ impl AppState {
         *self.advice.write().unwrap() = Some((Arc::new(docs), next_ms));
     }
 
-    /// The trip day's schedules, by route id, once loaded.
-    pub fn schedules_today(&self) -> Option<Arc<HashMap<String, RouteSchedule>>> {
+    /// The published schedules, by route id, once loaded.
+    pub fn route_schedules(&self) -> Option<Arc<HashMap<String, RouteSchedule>>> {
         self.schedule_data.read().unwrap().clone()
     }
 
@@ -257,7 +257,7 @@ async fn advice(
         None => error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("No sailings from terminal {terminal} today"),
+            &format!("No sailings from terminal {terminal} published"),
         ),
     }
 }
@@ -386,7 +386,7 @@ async fn load_stats(
     }
 }
 
-/// `/schedule?route=…`: a route's sailings for the trip day.
+/// `/schedule?route=…`: a route's sailings for the trip day and the next.
 async fn schedule(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -407,7 +407,7 @@ async fn schedule(
         None => error(
             StatusCode::NOT_FOUND,
             "not_found",
-            &format!("No schedule for route {route:?} today"),
+            &format!("No route {route:?}"),
         ),
     }
 }
@@ -673,10 +673,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let schedule = RouteSchedule {
             route: "seattle-bremerton".into(),
-            trip_date: "2026-10-30".into(),
-            season: "Fall 2026".into(),
-            pdf_url: None,
-            terminals: vec![],
+            days: vec![],
         };
         state.set_schedules(HashMap::from([("seattle-bremerton".to_string(), schedule)]));
         let (status, headers, body) = get(&state, path, None).await;

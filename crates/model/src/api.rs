@@ -197,12 +197,20 @@ pub struct PairStats {
     pub p90_min: f64,
 }
 
-/// `GET /schedule?route=…`: a route's published sailings for one trip
-/// day (WSF's schedule day, which runs past midnight), as departures from
-/// each of its terminals.
+/// `GET /schedule?route=…`: a route's published sailings for the current
+/// trip day and the next, oldest first. A day that's here with no
+/// departures has none published; a day that's missing couldn't be loaded,
+/// so nothing is known about it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RouteSchedule {
     pub route: String,
+    pub days: Vec<ScheduleDay>,
+}
+
+/// A route's sailings for one trip day (WSF's schedule day, which runs past
+/// midnight), as departures from each of its terminals.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleDay {
     /// The trip day, `2026-10-30`.
     pub trip_date: String,
     /// The season's schedule, as WSF names it ("Fall 2026").
@@ -305,11 +313,11 @@ pub struct HourLoads {
 }
 
 /// `GET /advice?terminal=…`: when to arrive by car for each of a
-/// terminal's sailings today, from how sailings like each filled before.
+/// terminal's sailings in the published schedule, from how sailings like
+/// each filled before.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalAdvice {
     pub terminal: u32,
-    pub trip_date: String,
     /// On routes that take reservations, when those holding one should
     /// arrive and check in (WSF's guidance).
     pub reservation: Option<ReservationAdvice>,
@@ -533,15 +541,15 @@ mod tests {
     #[test]
     fn reads_schedules() {
         let schedule: RouteSchedule = round_trip(
-            r#"{"route":"fauntleroy-vashon-southworth","trip_date":"2026-10-30",
+            r#"{"route":"fauntleroy-vashon-southworth","days":[{"trip_date":"2026-10-30",
                "season":"Fall 2026","pdf_url":null,"terminals":[
                  {"terminal":9,"notes":["Via Southworth"],"departures":[
                    {"departs_ms":1793394600000,"vessel_id":6,"vessel":"Kitsap",
                     "stops":[{"terminal":22,"arrives_ms":1793395800000},
                              {"terminal":20,"arrives_ms":null}],
-                    "loading":"both","notes":[0]}]}]}"#,
+                    "loading":"both","notes":[0]}]}]}]}"#,
         );
-        let d = &schedule.terminals[0].departures[0];
+        let d = &schedule.days[0].terminals[0].departures[0];
         assert_eq!(d.loading, Loading::Both);
         assert_eq!(d.stops[1].arrives_ms, None);
     }

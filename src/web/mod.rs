@@ -225,7 +225,7 @@ struct App {
     /// The data credits (#credits): the terrain's, then the network's.
     credits: Element,
     credits_base: String,
-    /// Crossing times, today's schedules and car deck use, by route id;
+    /// Crossing times, schedules and car deck use, by route id;
     /// how full boats' latest sailings left, by WSF id.
     crossings: Fetches<CrossingStats>,
     schedules: Fetches<RouteSchedule>,

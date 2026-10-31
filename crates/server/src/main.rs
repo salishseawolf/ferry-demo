@@ -18,6 +18,7 @@ mod db;
 mod history;
 mod http;
 mod live;
+mod published;
 mod reference;
 mod schedule;
 mod stats;

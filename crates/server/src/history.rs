@@ -351,7 +351,7 @@ pub struct Rebuilt {
 pub async fn rebuild(pool: &PgPool) -> Result<Rebuilt> {
     sqlx::query(
         "TRUNCATE vessel_positions, trips, sailing_space, notices, notice_terminals,
-             terminal_facing",
+             terminal_facing, published_sailings",
     )
     .execute(pool)
     .await?;
@@ -386,6 +386,9 @@ pub async fn rebuild(pool: &PgPool) -> Result<Rebuilt> {
             }
         }
     }
+    let (answers, unreadable) = crate::published::rebuild(pool, REBUILD_PAGE).await?;
+    rebuilt.answers += answers;
+    rebuilt.unreadable += unreadable;
     Ok(rebuilt)
 }
 

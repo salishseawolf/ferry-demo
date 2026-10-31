@@ -30,8 +30,14 @@ pub fn pacific_offset_ms(utc_ms: i64) -> i64 {
 
 /// The trip day at `utc_ms`, as `2026-10-30`.
 pub fn trip_date(utc_ms: i64) -> String {
+    trip_date_after(utc_ms, 0)
+}
+
+/// The trip day `days` after the one at `utc_ms`. By day number, not by
+/// adding hours, so a change of clocks between them doesn't matter.
+pub fn trip_date_after(utc_ms: i64, days: i64) -> String {
     let local = utc_ms + pacific_offset_ms(utc_ms) - DAY_STARTS_H * HOUR_MS;
-    let (y, m, d) = civil(local.div_euclid(DAY_MS));
+    let (y, m, d) = civil(local.div_euclid(DAY_MS) + days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
@@ -202,5 +208,17 @@ mod tests {
         // isn't, Saturday at noon is.
         assert!(busy(day(10, 30), 17 * 60) && !busy(day(10, 30), 11 * 60));
         assert!(!busy(day(10, 27), 14 * 60) && busy(day(10, 31), 12 * 60));
+    }
+
+    #[test]
+    fn counts_trip_days_across_a_change_of_clocks() {
+        // Sunday 2026-11-01 has 25 hours. Saturday 10 PM PDT:
+        let saturday_night = 1_793_509_200_000;
+        assert_eq!(trip_date(saturday_night), "2026-10-31");
+        assert_eq!(trip_date_after(saturday_night, 1), "2026-11-01");
+        assert_eq!(trip_date_after(saturday_night, 2), "2026-11-02");
+        // An hour before the trip day ends (2 AM PST on the 2nd).
+        assert_eq!(trip_date(1_793_613_600_000), "2026-11-01");
+        assert_eq!(trip_date_after(1_793_613_600_000, 1), "2026-11-02");
     }
 }

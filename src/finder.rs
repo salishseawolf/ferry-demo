@@ -10,8 +10,8 @@ use crate::routes::{Leg, ServiceRoute};
 use crate::search;
 use crate::terminals::{Bulletin, Terminal, Terminals};
 use ferry_model::api::{
-    Advice, CrossingStats, GuidanceReason, LoadStats, RouteSchedule, TerminalAdvice,
-    TerminalDepartures, VesselLoads,
+    Advice, CrossingStats, GuidanceReason, LoadStats, RouteSchedule, ScheduleDay, TerminalAdvice,
+    VesselLoads,
 };
 
 /// How many matches show.
@@ -19,6 +19,9 @@ pub const SHOWN: usize = 3;
 /// A timetable shows this many of the sailings already gone, before the
 /// next.
 const GONE_SHOWN: usize = 2;
+/// A timetable runs on into the next trip day's sailings this far from now
+/// (ms), so it doesn't thin out as the day ends.
+const AHEAD_MS: f64 = 12.0 * 3_600_000.0;
 /// A terminal lists this many upcoming sailings.
 const SAILINGS_LISTED: usize = 4;
 
@@ -74,7 +77,7 @@ pub struct Info {
     pub facts: Vec<(String, String)>,
     pub lists: Vec<(String, Vec<String>)>,
     pub notices: Vec<Notice>,
-    /// The day's scheduled departures, for a terminal or route.
+    /// The scheduled departures coming up, for a terminal or route.
     pub timetables: Vec<Timetable>,
     /// How full car decks leave, by hour, for a route.
     pub load_charts: Vec<LoadChart>,
@@ -82,7 +85,7 @@ pub struct Info {
     pub wikipedia: Option<String>,
 }
 
-/// One terminal's departures for the day, from the published schedule.
+/// One terminal's departures coming up, from the published schedule.
 #[derive(Debug, PartialEq)]
 pub struct Timetable {
     pub heading: String,
@@ -107,6 +110,10 @@ pub struct TimetableRow {
     pub cancelled: bool,
     /// When to arrive by car, for sailings still to come.
     pub advice: Option<RowAdvice>,
+    /// The next trip day starts at this row: what to call it, as WSF's
+    /// printed schedules divide them (sailings after midnight go with the
+    /// day before).
+    pub day_break: Option<String>,
 }
 
 /// A timetable row's arrival advice: what its Arrive by column says (a
@@ -189,7 +196,7 @@ pub struct Scope<'a> {
     /// deck use on each route (by index into `routes`).
     pub vessel_loads: &'a dyn Fn(u32) -> Loaded<'a, VesselLoads>,
     pub route_loads: &'a dyn Fn(usize) -> Loaded<'a, LoadStats>,
-    /// When to arrive by car for each terminal's sailings today (by WSF
+    /// When to arrive by car for each terminal's sailings (by WSF
     /// id).
     pub advice: &'a dyn Fn(u32) -> Loaded<'a, TerminalAdvice>,
     pub now_ms: f64,
@@ -537,39 +544,70 @@ impl Scope<'_> {
         };
         let schedule = match schedule {
             Loaded::Pending => return empty(heading, "Loading the schedule…"),
-            Loaded::Missing => return empty(heading, "No schedule for today"),
+            Loaded::Missing => return empty(heading, "The schedule isn't available right now"),
             Loaded::Here(s) => s,
         };
-        let caption = trip_day(&schedule.trip_date).map_or_else(
-            || schedule.season.clone(),
-            |day| match schedule.season.as_str() {
-                "" => format!("Schedule for {day}"),
-                season => format!("{season} schedule, {day}"),
-            },
-        );
-        let none = TerminalDepartures {
-            terminal: from,
-            departures: Vec::new(),
-            notes: Vec::new(),
+        let Some(last_day) = schedule.days.last() else {
+            return empty(heading, "The schedule isn't available right now");
         };
-        let here = (schedule.terminals.iter())
-            .find(|d| d.terminal == from)
-            .unwrap_or(&none);
-        if here.departures.is_empty() {
-            return empty(heading, "No departures today");
+        // What to show: all of the first day's, then the next day's as far
+        // as `AHEAD_MS` from now, or to its first if none's come up by then.
+        let mut shown = Vec::new();
+        let mut coming = false;
+        'days: for (i, day) in schedule.days.iter().enumerate() {
+            let Some(here) = day.terminals.iter().find(|t| t.terminal == from) else {
+                continue;
+            };
+            for d in &here.departures {
+                let departs = d.departs_ms as f64;
+                if i > 0 && coming && departs > self.now_ms + AHEAD_MS {
+                    break 'days;
+                }
+                shown.push((i, d, here));
+                coming |= departs >= self.now_ms;
+            }
         }
+        // WSF's schedules can only say what's published, not why or for how
+        // long; any notice about it is shown with the terminal or route.
+        let through = trip_day(&last_day.trip_date).unwrap_or_default();
+        let unknown_after = if schedule.days.len() < 2 {
+            "; the next day's schedule isn't available"
+        } else {
+            ""
+        };
+        if shown.is_empty() {
+            let caption = format!("No sailings scheduled through {through}{unknown_after}");
+            return empty(heading, &caption);
+        }
+        // Of those gone, only the last few, for context.
+        let gone = (shown.iter())
+            .filter(|(_, d, _)| (d.departs_ms as f64) < self.now_ms)
+            .count();
+        shown.drain(..gone.saturating_sub(GONE_SHOWN));
         let places = |d: &ferry_model::api::Departure| {
             (d.stops.iter())
                 .map(|s| self.terminal_name(s.terminal))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let first = places(&here.departures[0]);
-        let one_place = here.departures.iter().all(|d| places(d) == first);
+        let first = places(shown[0].1);
+        let one_place = shown.iter().all(|(_, d, _)| places(d) == first);
         let heading = if one_place {
             format!("{heading} to {first}")
         } else {
             heading
+        };
+        let first_day = &schedule.days[shown[0].0];
+        let caption = if coming {
+            trip_day(&first_day.trip_date).map_or_else(
+                || first_day.season.clone(),
+                |day| match first_day.season.as_str() {
+                    "" => format!("Schedule for {day}"),
+                    season => format!("{season} schedule, {day}"),
+                },
+            )
+        } else {
+            format!("No more sailings scheduled through {through}{unknown_after}")
         };
         let cancelled: Vec<f64> = (self.terminals.list.iter())
             .find(|t| t.id == from)
@@ -584,8 +622,11 @@ impl Scope<'_> {
             Loaded::Here(a) => Some(a),
             _ => None,
         };
-        let rows = (here.departures.iter())
-            .map(|d| {
+        // Footnotes are per day: one list for all those shown, each once.
+        let mut notes: Vec<String> = Vec::new();
+        let mut day_shown = shown[0].0;
+        let rows = (shown.iter())
+            .map(|&(i, d, here)| {
                 let departs = d.departs_ms as f64;
                 let when = if departs < self.now_ms {
                     When::Gone
@@ -595,7 +636,20 @@ impl Scope<'_> {
                 } else {
                     When::Later
                 };
-                let marks: Vec<String> = d.notes.iter().map(|n| (n + 1).to_string()).collect();
+                let marks: Vec<String> = (d.notes.iter())
+                    .filter_map(|&n| here.notes.get(usize::from(n)))
+                    .map(|text| match notes.iter().position(|n| n == text) {
+                        Some(at) => (at + 1).to_string(),
+                        None => {
+                            notes.push(text.clone());
+                            notes.len().to_string()
+                        }
+                    })
+                    .collect();
+                let day_break = (i != day_shown).then(|| {
+                    day_shown = i;
+                    day_heading(&schedule.days[i], first_day)
+                });
                 TimetableRow {
                     time: (self.clock)(departs),
                     to: if one_place { String::new() } else { places(d) },
@@ -608,18 +662,15 @@ impl Scope<'_> {
                         .flatten()
                         .and_then(|a| a.sailings.iter().find(|s| s.departs_ms == d.departs_ms))
                         .and_then(|s| self.row_advice(s)),
+                    day_break,
                 }
             })
             .collect();
-        // Of those gone, only the last few, for context.
-        let mut rows: Vec<TimetableRow> = rows;
-        let gone = rows.iter().filter(|r| r.when == When::Gone).count();
-        rows.drain(..gone.saturating_sub(GONE_SHOWN));
         Timetable {
             heading,
             caption,
             rows,
-            notes: here.notes.clone(),
+            notes,
         }
     }
 
@@ -864,6 +915,40 @@ fn trip_day(date: &str) -> Option<String> {
     let month: usize = parts.next()?.parse().ok()?;
     let day: u32 = parts.next()?.parse().ok()?;
     Some(format!("{} {day}", MONTHS.get(month.checked_sub(1)?)?))
+}
+
+/// The name of a date's day of the week (Sakamoto's method).
+fn weekday(date: &str) -> Option<&'static str> {
+    const DAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    const MONTH_OFFSETS: [usize; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let mut parts = date.split('-');
+    let year: usize = parts.next()?.parse().ok()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: usize = parts.next()?.parse().ok()?;
+    let y = if month < 3 { year - 1 } else { year };
+    let offset = MONTH_OFFSETS.get(month.checked_sub(1)?)?;
+    DAYS.get((y + y / 4 - y / 100 + y / 400 + offset + day) % 7)
+        .copied()
+}
+
+/// A divider's words for `day` in a timetable that began on `first`: its
+/// date, and its schedule if that's changed (a new season).
+fn day_heading(day: &ScheduleDay, first: &ScheduleDay) -> String {
+    let date = trip_day(&day.trip_date).unwrap_or_else(|| day.trip_date.clone());
+    let name = weekday(&day.trip_date).map_or(date.clone(), |w| format!("{w}, {date}"));
+    if day.season == first.season || day.season.is_empty() {
+        name
+    } else {
+        format!("{name} · {} schedule", day.season)
+    }
 }
 
 /// A sailing's drive-up space, as "38 of 202 drive-up".
@@ -1153,8 +1238,12 @@ mod dom {
                     add(&document, &ul, "li", "", line);
                 }
             }
+            // All the schedules together, set off from the rest.
+            let schedules = (!info.timetables.is_empty())
+                .then(|| add(&document, &inner, "div", "schedules", ""));
             for table in &info.timetables {
-                let section = add(&document, &inner, "section", "", "");
+                let Some(schedules) = &schedules else { break };
+                let section = add(&document, schedules, "section", "leg", "");
                 add(&document, &section, "h3", "", &table.heading);
                 add(&document, &section, "div", "caption", &table.caption);
                 if table.rows.is_empty() {
@@ -1168,6 +1257,9 @@ mod dom {
                     add(&document, &head, "span", "", label);
                 }
                 for row in &table.rows {
+                    if let Some(day) = &row.day_break {
+                        add(&document, &list, "li", "day", day);
+                    }
                     let class = match row.when {
                         When::Gone => "gone",
                         When::Next => "next",
@@ -1369,7 +1461,7 @@ mod tests {
         // Kingston's sailings, one gone and two to come (now is
         // 1_793_297_887_000), the last with a footnote.
         let schedule: RouteSchedule = serde_json::from_str(
-            r#"{"route":"edmonds-kingston","trip_date":"2026-10-29","season":"Fall 2026",
+            r#"{"route":"edmonds-kingston","days":[{"trip_date":"2026-10-29","season":"Fall 2026",
                 "pdf_url":null,"terminals":[{"terminal":12,"notes":["Walk-on only"],
                 "departures":[
                   {"departs_ms":1793290000000,"vessel_id":2,"vessel":"Walla Walla",
@@ -1381,7 +1473,7 @@ mod tests {
                   {"departs_ms":1793299000000,"vessel_id":1,"vessel":"Spokane",
                    "stops":[{"terminal":8,"arrives_ms":null}],"loading":"both","notes":[]},
                   {"departs_ms":1793301000000,"vessel_id":2,"vessel":"Walla Walla",
-                   "stops":[{"terminal":8,"arrives_ms":null}],"loading":"both","notes":[0]}]}]}"#,
+                   "stops":[{"terminal":8,"arrives_ms":null}],"loading":"both","notes":[0]}]}]}]}"#,
         )
         .unwrap();
         let scheduled = |_: usize| Loaded::Here(&schedule);
@@ -1405,7 +1497,7 @@ mod tests {
         // Kingston's next sailing usually fills: arrive 30 minutes early;
         // the one after usually has room.
         let kingston_advice: TerminalAdvice = serde_json::from_str(
-            r#"{"terminal":12,"trip_date":"2026-10-29","reservation":null,"sailings":[
+            r#"{"terminal":12,"reservation":null,"sailings":[
                 {"departs_ms":1793299000000,"holiday":null,"advice":{"kind":"arrive_by",
                   "arrive_by_ms":1793297200000,"likely":0.9,"usually_full_ms":1793297800000,
                   "sailings":6,"basis":"Fridays","pace":null}},
@@ -1469,7 +1561,10 @@ mod tests {
             .map(|t| t.heading.as_str())
             .collect();
         assert_eq!(headings, ["From Terminal 8", "From Kingston to Terminal 8"]);
-        assert_eq!(route.timetables[0].caption, "No departures today");
+        assert_eq!(
+            route.timetables[0].caption,
+            "No sailings scheduled through Oct 29; the next day's schedule isn't available"
+        );
         let kingston = &route.timetables[1];
         assert_eq!(kingston.caption, "Fall 2026 schedule, Oct 29");
         let rows: Vec<(&str, When, &str)> = (kingston.rows.iter())
@@ -1551,5 +1646,204 @@ mod tests {
         assert_eq!(route.load_charts[0].caption, "Loading…");
         assert_eq!(trip_day("2026-01-05").as_deref(), Some("Jan 5"));
         assert_eq!(trip_day("soon"), None);
+    }
+
+    /// A trip day, its season, and the ms each sailing leaves, and whether
+    /// it has the day's footnote.
+    type TestDay<'a> = (&'a str, &'a str, &'a [(f64, bool)]);
+
+    /// A timetable from terminal 12 (to 8) at `now`, of two days' sailings.
+    fn timetable_of(days: &[TestDay<'_>], now: f64) -> Timetable {
+        let days: Vec<serde_json::Value> = days
+            .iter()
+            .map(|(date, season, sailings)| {
+                let departures: Vec<serde_json::Value> = sailings
+                    .iter()
+                    .map(|(ms, noted)| {
+                        serde_json::json!({
+                            "departs_ms": *ms as i64, "vessel_id": 1, "vessel": "Spokane",
+                            "stops": [{"terminal": 8, "arrives_ms": null}],
+                            "loading": "both", "notes": if *noted { vec![0] } else { vec![] },
+                        })
+                    })
+                    .collect();
+                let terminals = if sailings.is_empty() {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([{
+                        "terminal": 12, "notes": [format!("Note for {date}")],
+                        "departures": departures,
+                    }])
+                };
+                serde_json::json!({
+                    "trip_date": date, "season": season, "pdf_url": null, "terminals": terminals,
+                })
+            })
+            .collect();
+        let schedule: RouteSchedule = serde_json::from_value(serde_json::json!({
+            "route": "edmonds-kingston", "days": days,
+        }))
+        .unwrap();
+        schedule_scope(now, |scope| {
+            scope.timetable("Departures".to_string(), Loaded::Here(&schedule), 12)
+        })
+    }
+
+    /// Calls `f` with a scope holding nothing but the time.
+    fn schedule_scope<R>(now: f64, f: impl Fn(&Scope<'_>) -> R) -> R {
+        let fleet = Fleet::default();
+        let terminals = Terminals::default();
+        let clock = |ms: f64| format!("t{}", (ms / HOUR) as i64);
+        let scope = Scope {
+            fleet: &fleet,
+            terminals: &terminals,
+            routes: &[],
+            legs: &[],
+            crossings: &|_| None,
+            schedules: &|_| Loaded::Missing,
+            vessel_loads: &|_| Loaded::Missing,
+            route_loads: &|_| Loaded::Missing,
+            advice: &|_| Loaded::Missing,
+            now_ms: now,
+            clock: &clock,
+            date_clock: &clock,
+        };
+        f(&scope)
+    }
+
+    const HOUR: f64 = 3_600_000.0;
+
+    /// (time, day break) of each row.
+    fn rows_of(table: &Timetable) -> Vec<(&str, Option<&str>)> {
+        (table.rows.iter())
+            .map(|r| (r.time.as_str(), r.day_break.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn runs_on_into_the_next_day_with_a_divider() {
+        let now = 22.0 * HOUR;
+        let table = timetable_of(
+            &[
+                ("2026-10-30", "Fall 2026", &[(23.0 * HOUR, false)]),
+                (
+                    "2026-10-31",
+                    "Fall 2026",
+                    &[
+                        (29.0 * HOUR, false),
+                        (34.0 * HOUR, false),
+                        (35.0 * HOUR, false),
+                    ],
+                ),
+            ],
+            now,
+        );
+        // To 12 hours from now: the 35th hour falls just outside.
+        assert_eq!(
+            rows_of(&table),
+            [
+                ("t23", None),
+                ("t29", Some("Saturday, Oct 31")),
+                ("t34", None)
+            ]
+        );
+        assert_eq!(table.caption, "Fall 2026 schedule, Oct 30");
+        assert_eq!(table.rows[0].when, When::Next);
+    }
+
+    #[test]
+    fn shows_all_of_the_day_however_far_off_and_nothing_of_the_next_unless_near() {
+        let table = timetable_of(
+            &[
+                (
+                    "2026-10-30",
+                    "Fall 2026",
+                    &[(9.0 * HOUR, false), (22.0 * HOUR, false)],
+                ),
+                ("2026-10-31", "Fall 2026", &[(29.0 * HOUR, false)]),
+            ],
+            8.0 * HOUR,
+        );
+        assert_eq!(rows_of(&table), [("t9", None), ("t22", None)]);
+    }
+
+    #[test]
+    fn reaches_past_the_window_for_the_next_sailing_with_nothing_sooner() {
+        let table = timetable_of(
+            &[
+                ("2026-10-30", "Fall 2026", &[(20.0 * HOUR, false)]),
+                (
+                    "2026-10-31",
+                    "Winter 2027",
+                    &[(40.0 * HOUR, false), (41.0 * HOUR, false)],
+                ),
+            ],
+            21.0 * HOUR,
+        );
+        // The one gone, then only the next, however far, naming the new
+        // season's schedule; that's still the caption's day.
+        assert_eq!(
+            rows_of(&table),
+            [
+                ("t20", None),
+                ("t40", Some("Saturday, Oct 31 · Winter 2027 schedule"))
+            ]
+        );
+        assert_eq!(table.caption, "Fall 2026 schedule, Oct 30");
+        assert_eq!(table.rows[1].when, When::Next);
+    }
+
+    #[test]
+    fn numbers_footnotes_across_days() {
+        let table = timetable_of(
+            &[
+                ("2026-10-30", "Fall 2026", &[(23.0 * HOUR, true)]),
+                ("2026-10-31", "Fall 2026", &[(29.0 * HOUR, true)]),
+            ],
+            22.0 * HOUR,
+        );
+        let marks: Vec<&str> = table.rows.iter().map(|r| r.marks.as_str()).collect();
+        assert_eq!(marks, ["1", "2"]);
+        assert_eq!(table.notes, ["Note for 2026-10-30", "Note for 2026-10-31"]);
+    }
+
+    #[test]
+    fn says_what_is_known_when_there_are_no_sailings() {
+        let none: &[(f64, bool)] = &[];
+        // Nothing published for either day.
+        let table = timetable_of(
+            &[("2026-10-30", "", none), ("2026-10-31", "", none)],
+            10.0 * HOUR,
+        );
+        assert!(table.rows.is_empty());
+        assert_eq!(table.caption, "No sailings scheduled through Oct 31");
+        // The last has gone, and nothing's published for the next day.
+        let table = timetable_of(
+            &[
+                ("2026-10-30", "Fall 2026", &[(9.0 * HOUR, false)]),
+                ("2026-10-31", "", none),
+            ],
+            10.0 * HOUR,
+        );
+        assert_eq!(rows_of(&table), [("t9", None)]);
+        assert_eq!(table.rows[0].when, When::Gone);
+        assert_eq!(table.caption, "No more sailings scheduled through Oct 31");
+        // The next day couldn't be loaded: that's not the same as none.
+        let table = timetable_of(&[("2026-10-30", "", none)], 10.0 * HOUR);
+        assert_eq!(
+            table.caption,
+            "No sailings scheduled through Oct 30; the next day's schedule isn't available"
+        );
+        // Nothing could be loaded at all.
+        let table = timetable_of(&[], 10.0 * HOUR);
+        assert_eq!(table.caption, "The schedule isn't available right now");
+    }
+
+    #[test]
+    fn names_days_of_the_week() {
+        assert_eq!(weekday("2026-10-31"), Some("Saturday"));
+        assert_eq!(weekday("2027-01-01"), Some("Friday"));
+        assert_eq!(weekday("2028-02-29"), Some("Tuesday"));
+        assert_eq!(weekday("soon"), None);
     }
 }

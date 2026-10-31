@@ -19,7 +19,7 @@ const { open, find } = require("./app");
     check(`${size}: finds a boat`, boats.some((b) => /Walla Walla/.test(b)), boats.slice(0, 3).join(", "));
     await find(page, "kingston");
     const table = await page.evaluate(() => {
-      const rows = [...document.querySelectorAll("#finder-list .hit.selected .timetable li:not(.head)")];
+      const rows = [...document.querySelectorAll("#finder-list .hit.selected .timetable li:not(.head):not(.day)")];
       return {
         rows: rows.length,
         advice: rows.filter((r) => r.querySelector(".advice")?.textContent).length,
