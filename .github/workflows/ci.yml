@@ -43,6 +43,19 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: lint
+      # Cargo.lock must already agree with the manifests: otherwise cargo
+      # quietly resolves again and the checks test something else (as when
+      # a lockfile-only update asks for a version Cargo.toml rules out).
+      # `--locked` doesn't catch that case (cargo 1.99 rewrites the lockfile
+      # and carries on), so this lets cargo resolve and fails if it changed
+      # the lockfile at all.
+      - name: Lockfile matches Cargo.toml
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          if ! git diff --exit-code -- Cargo.lock; then
+            echo "::error file=Cargo.lock::Cargo.lock doesn't match Cargo.toml: update it (cargo update -w) and commit it."
+            exit 1
+          fi
       - run: mise run check
 
   test:
