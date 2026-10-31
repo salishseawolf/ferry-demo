@@ -1,0 +1,8 @@
+{
+  "name": "ferry-demo-browser",
+  "private": true,
+  "description": "Screenshots and a smoke test of the app in headless Chromium with WebGPU (tools/dev/offline)",
+  "dependencies": {
+    "puppeteer-core": "23.11.1"
+  }
+}

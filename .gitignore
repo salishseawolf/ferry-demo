@@ -10,3 +10,5 @@ __pycache__/
 *.pyc
 # Local experiments, kept out of the repo.
 /.scratch/
+# The browser scripts' packages (tools/dev/browser: npm ci).
+node_modules/

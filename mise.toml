@@ -70,6 +70,22 @@ mv "$f.part" "$f"
 ls -lh "$f"
 '''
 
+[tasks."dev:offline"]
+description = "Run the app with no network or WSDOT key, against a fake WSF (DUMP=dumps/… to start from a dump; see tools/dev/offline/run.sh)"
+depends = ["tiles:routes"]
+run = "tools/dev/offline/run.sh"
+
+[tasks."dev:shot"]
+description = "Screenshot the running app in headless Chromium: mise run dev:shot -- OUT.png [--phone] [--at LAT,LON,ALT_M] [--find TEXT]"
+# Only these tasks need Node, so it isn't in [tools] (CI doesn't install it).
+tools = { node = "24" }
+run = "[ -d tools/dev/browser/node_modules ] || npm ci --prefix tools/dev/browser --no-audit --no-fund --silent; node tools/dev/browser/shot.js"
+
+[tasks."dev:smoke"]
+description = "Check the app end to end in headless Chromium, against dev:offline"
+tools = { node = "24" }
+run = "[ -d tools/dev/browser/node_modules ] || npm ci --prefix tools/dev/browser --no-audit --no-fund --silent; node tools/dev/browser/smoke.js"
+
 [tasks.build]
 description = "Release build into dist/"
 run = "trunk build --release"

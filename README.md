@@ -42,6 +42,9 @@ Other tasks:
 | `mise run build` | The release build of the app |
 | `mise run container:build` | The release images |
 | `mise run dev:advice` | The daily advice job, by hand |
+| `mise run dev:offline` | The app with no network or access code, against a stand-in for WSF's API (`tools/dev/offline/`); `DUMP=` starts from a database dump |
+| `mise run dev:smoke` | An end-to-end check of the running app in headless Chromium |
+| `mise run dev:shot -- OUT.png` | A screenshot of the running app (`--phone`, `--find TEXT`, `--at LAT,LON,ALT_M`) |
 
 ## Images
 
