@@ -193,14 +193,16 @@ impl App {
                 group_thousands(t.available() as u64)
             ),
         );
-        let c = self.renderer.counts;
-        row("Draw calls", c.draw_calls.to_string());
-        row("Triangles", group_thousands(c.triangles));
-        row("Line segments", group_thousands(c.line_segments));
-        row(
-            "GPU memory",
-            format!("≈ {}", format_bytes(self.renderer.gpu_bytes())),
-        );
+        if let Some(renderer) = &self.renderer {
+            let c = renderer.counts;
+            row("Draw calls", c.draw_calls.to_string());
+            row("Triangles", group_thousands(c.triangles));
+            row("Line segments", group_thousands(c.line_segments));
+            row(
+                "GPU memory",
+                format!("≈ {}", format_bytes(renderer.gpu_bytes())),
+            );
+        }
         rows
     }
 

@@ -1,5 +1,7 @@
 //! The app in the browser: the globe, its ferries and the panels over
-//! it, drawn each frame by `App`.
+//! it, drawn each frame by `App`. Without a GPU to draw the globe, the
+//! panels work all the same, with a list of the boats in its place
+//! (`no_map`).
 
 mod debug;
 mod dom;
@@ -9,6 +11,7 @@ mod fit;
 mod hex;
 mod labels;
 mod measuring;
+mod no_map;
 mod notes;
 mod picking;
 mod setup;
@@ -16,6 +19,7 @@ mod setup;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -51,6 +55,7 @@ use fit::Flight;
 use hex::HexGrid;
 use labels::Labels;
 use measuring::MeasureBox;
+use no_map::NoMap;
 use notes::{Notes, html_escape};
 use picking::RouteLine;
 use setup::run;
@@ -192,7 +197,12 @@ struct Press {
 
 struct App {
     canvas: HtmlCanvasElement,
-    renderer: Renderer,
+    /// None when the browser can't draw the map, or stopped being able
+    /// to: `no_map` shows instead.
+    renderer: Option<Renderer>,
+    /// Why the GPU was lost, once it is (set from the device's callback).
+    map_lost: Arc<Mutex<Option<String>>>,
+    no_map: NoMap,
     camera: OrbitCamera,
     measure: Measure,
     /// Last on-planet cursor position while measuring, so the box keeps
@@ -345,6 +355,15 @@ impl App {
     /// One animation frame; `time_ms` is the frame's timestamp.
     fn frame(&mut self, time_ms: f64) {
         let start = now_ms();
+        let lost = self.map_lost.lock().ok().and_then(|mut m| m.take());
+        if let Some(message) = lost
+            && self.renderer.is_some()
+        {
+            log::error!("{message}");
+            self.lose_map(
+                "The map stopped: the browser lost its GPU. Reload the page to try again.",
+            );
+        }
         if let Some(flight) = &mut self.flight {
             let started = *flight.started_ms.get_or_insert(time_ms);
             let t = ((time_ms - started) / FLIGHT_MS).clamp(0.0, 1.0);
@@ -392,11 +411,16 @@ impl App {
         if self.finder_stale {
             self.finder_stale = false;
             self.show_selection_info();
+            if self.renderer.is_none() {
+                self.no_map.show_list(&self.fleet, &self.service_routes);
+            }
         }
         let vessels_due = self.layers & LAYER_FERRIES != 0 && time_ms >= self.vessels_due_ms;
-        let wanted =
-            self.redraw || vessels_due || self.terrain.busy() || self.renderer.needs_frame();
-        if !paused && wanted {
+        let wanted = self.redraw
+            || vessels_due
+            || self.terrain.busy()
+            || self.renderer.as_ref().is_some_and(Renderer::needs_frame);
+        if !paused && wanted && self.renderer.is_some() {
             // After an idle spell, average afresh: the gap isn't a slow
             // frame. Short gaps (between mouse events) are just activity.
             if time_ms - self.last_draw_ms > IDLE_AFTER_MS {
@@ -445,7 +469,9 @@ impl App {
                 }
             })
             .collect();
-        self.renderer.set_overlay(LAYER_FERRIES, &scene.segments);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_overlay(LAYER_FERRIES, &scene.segments);
+        }
         self.legs = network
             .legs
             .iter()
@@ -828,7 +854,9 @@ impl App {
     }
 
     fn draw_frame(&mut self) {
-        let (width, height) = self.renderer.sync_size();
+        let Some((width, height)) = self.renderer.as_mut().map(Renderer::sync_size) else {
+            return;
+        };
         self.camera.aspect = width as f64 / height as f64;
         let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
 
@@ -870,8 +898,10 @@ impl App {
         // quadruple the tiles for little visible gain.
         let height_px = self.canvas.client_height().max(1) as f64;
         let view = GlobeView::new(&self.camera, height_px);
-        let regions = self.terrain.update(&mut self.renderer, &view);
-        self.renderer.render(&globals, &scene, &regions);
+        if let Some(renderer) = &mut self.renderer {
+            let regions = self.terrain.update(renderer, &view);
+            renderer.render(&globals, &scene, &regions);
+        }
         self.update_measure_box();
         // A click: fly to what it was on, and bring that up in the finder.
         if let Some((_, touch)) = self.pending_click.take() {
@@ -887,7 +917,18 @@ impl App {
         }
     }
 
-    /// Switches the measuring tool on or off; off clears the measurement.
+    /// Gives up on the map, saying why: the list of boats takes its place,
+    /// and what only the map used goes away with it (index.html hides the
+    /// rest under `.no-map`).
+    fn lose_map(&mut self, why: &str) {
+        self.renderer = None;
+        self.set_measuring(false);
+        self.set_settings_open(false);
+        self.notes.close();
+        self.no_map.show(why);
+        self.no_map.show_list(&self.fleet, &self.service_routes);
+    }
+
     /// Opens or closes the map settings.
     fn set_settings_open(&self, open: bool) {
         let _ = self.settings.toggle_attribute_with_force("hidden", !open);
@@ -968,7 +1009,7 @@ impl App {
             .target()
             .and_then(|t| t.dyn_into::<Element>().ok())
             .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "BUTTON"));
-        if on_control || e.ctrl_key() || e.meta_key() || e.alt_key() {
+        if on_control || e.ctrl_key() || e.meta_key() || e.alt_key() || self.renderer.is_none() {
             return;
         }
         match e.key().as_str() {

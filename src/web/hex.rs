@@ -55,7 +55,9 @@ impl App {
         // Cells along the rim reach past it; keep only the lines inside.
         let inside = |p: [f32; 3]| KITSAP_SLICE.contains(glam::Vec3::from_array(p).as_dvec3());
         lines.retain(|l| inside(l.a) && inside(l.b));
-        self.renderer.set_overlay(LAYER_CELLS, &lines);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_overlay(LAYER_CELLS, &lines);
+        }
         self.hex.built_for = Some(built_for);
         self.hex.built_m_per_px = m_per_px;
         self.hex.cells = cells.len();

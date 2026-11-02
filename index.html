@@ -413,6 +413,36 @@
          empty overlay covers the canvas and swallows all pointer events. */
       #error[hidden] { display: none; }
 
+      /* No map (web/no_map.rs): the boats by route in its place, clear of
+         the finder on its left, and what only works over the map hidden. */
+      .no-map #world, .no-map #labels, .no-map #notes, .no-map #settings-toggle, .no-map #hud-vessel { display: none; }
+      #no-map {
+        position: fixed; inset: 0; overflow-y: auto; background: var(--tint);
+        padding: var(--top) var(--right) calc(var(--bottom) + 40px) calc(var(--left) + 424px);
+      }
+      #no-map[hidden] { display: none; }
+      /* Over the list, the credits need a ground of their own. */
+      .no-map #credits { padding: 4px 0; background: var(--tint); box-shadow: 0 0 0 4px var(--tint); }
+      #no-map .column { max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
+      #no-map-why { margin: 0; padding: 10px 12px; font-size: 12.5px; }
+      #no-map-list { display: flex; flex-direction: column; gap: 10px; }
+      #no-map section { padding: 8px 12px 10px; }
+      #no-map h3 { margin: 0 0 4px; font: 700 12.5px/1.3 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+      #no-map h3 button {
+        padding: 0; border: 0; background: none; color: var(--ink); cursor: pointer;
+        font: inherit; letter-spacing: inherit; text-transform: inherit; text-align: left;
+      }
+      #no-map h3 button:hover { color: var(--mark); }
+      #no-map ul { margin: 0; padding: 0; list-style: none; }
+      #no-map li + li { border-top: 1px solid var(--rule); }
+      #no-map li button {
+        display: flex; flex-direction: column; width: 100%; padding: 6px 0; border: 0; background: none;
+        color: var(--ink); font: inherit; text-align: left; cursor: pointer; font-variant-numeric: tabular-nums;
+      }
+      #no-map li button:hover b { color: var(--mark); }
+      #no-map li span { color: var(--muted); font-size: 12px; }
+      #no-map .none, #no-map .laid-up { margin: 0; padding: 6px 0; color: var(--muted); font-size: 12px; }
+
       /* Phones: the search bar spans the top, settings drop below it, the
          matches and details are a sheet at the bottom (web/ sets its
          height: .sheet-peek, -half or -full on #finder), and the credits
@@ -450,6 +480,8 @@
         #credits:not(.open) { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
         /* Hung from the top here, so a fixed height keeps its foot still. */
         #perf { top: calc(var(--top) + 52px); bottom: auto; height: min(60dvh, 520px); }
+        /* Below the search bar, and scrolling clear of the sheet's peek. */
+        #no-map { padding: calc(var(--top) + 56px) var(--right) calc(124px + var(--bottom) + 40px) var(--left); }
       }
       @media (prefers-reduced-motion: reduce) {
         #finder-list .more, #finder-drop, #finder.open #finder-drop, .switch input, .switch input::after { transition: none; }
@@ -458,6 +490,13 @@
   </head>
   <body>
     <canvas id="world"></canvas>
+    <!-- In the map's place when the browser can't draw it (web/no_map.rs). -->
+    <section id="no-map" aria-label="Boats by route" hidden>
+      <div class="column">
+        <p id="no-map-why" class="paper"></p>
+        <div id="no-map-list"></div>
+      </div>
+    </section>
     <div id="labels" aria-hidden="true"></div>
     <div id="notes"></div>
     <div id="finder">

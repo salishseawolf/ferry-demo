@@ -1,16 +1,18 @@
-//! Building the app: the GPU, the page's elements and its event handlers.
+//! Building the app: the GPU (if the browser has one it can draw with),
+//! the page's elements and its event handlers.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::JsCast;
 use web_sys::{
-    Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent, PointerEvent, WheelEvent,
+    Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent, PointerEvent, WheelEvent, Window,
 };
 
 use crate::camera::{OrbitCamera, parse_view_fragment};
-use crate::finder::{Finder, Sheet};
+use crate::finder::{Finder, Sheet, Target};
 use crate::fleet::Fleet;
 use crate::geo::{EARTH_RADIUS_M, LonLat};
 use crate::grid::KITSAP_SLICE;
@@ -25,11 +27,12 @@ use crate::tiles::{TerrainLoader, load_index};
 use crate::view::STYLE_CARTOGRAPHIC;
 
 use super::debug::Perf;
-use super::dom::{listen, now_ms, page_hidden, show_error, sleep_ms};
+use super::dom::{listen, now_ms, page_hidden, sleep_ms};
 use super::fetches::Fetches;
 use super::hex::HexGrid;
 use super::labels::Labels;
 use super::measuring::MeasureBox;
+use super::no_map::NoMap;
 use super::notes::Notes;
 use super::{App, LAYER_TOGGLES, STYLE_CHOICES, TAB_RETURN_GRACE_MS, animate};
 
@@ -57,56 +60,52 @@ pub(super) async fn run() -> Result<(), String> {
         .dyn_into()
         .map_err(|_| "#world is not a canvas")?;
 
-    if !window.is_secure_context() {
-        return Err(
-            "WebGPU needs a secure context: open this page over https or on localhost.".into(),
-        );
-    }
-    let has_webgpu = js_sys::Reflect::has(&window.navigator(), &"gpu".into()).unwrap_or(false);
-    if !has_webgpu {
-        return Err(
-            "This browser has WebGPU disabled or unsupported (navigator.gpu is missing).".into(),
-        );
-    }
-
-    // A page reloaded in a background tab (the dev server does this) waits
-    // until it's shown, and a moment more, before touching the GPU.
-    if page_hidden() {
-        while page_hidden() {
-            sleep_ms(100.0).await;
+    let map_lost = Arc::new(Mutex::new(None));
+    let (renderer, why_no_map) = match start_map(&window, &canvas).await {
+        Ok(renderer) => {
+            let lost = map_lost.clone();
+            renderer.on_device_lost(move |message| {
+                if let Ok(mut lost) = lost.lock() {
+                    *lost = Some(message);
+                }
+            });
+            (Some(renderer), None)
         }
-        sleep_ms(TAB_RETURN_GRACE_MS).await;
-    }
-    let renderer = Renderer::new(canvas.clone(), &KITSAP_SLICE).await?;
-    renderer.on_device_lost(|message| {
-        log::error!("{message}");
-        show_error(&format!("{message}. Reload the page to start again."));
-    });
+        Err(why) => (None, Some(why)),
+    };
     // Without tiles the slice still renders, as the plain backdrop. The
     // route network's credits are added when it arrives.
     let credits = element("credits")?;
-    let (manifest, credits_base) = match load_index("elevation").await {
-        Ok(index) => {
-            log::info!("terrain: {} tiles available", index.manifest.len());
-            let base = format!(
-                "Elevation: {} · Ferry positions: Washington State Department of Transportation",
-                index.attribution.join(" · ")
-            );
-            (index.manifest, base)
-        }
-        Err(e) => {
-            log::warn!("no terrain tiles: {e}");
-            let base =
-                "No elevation tiles: run <code>mise run tiles:elevation</code>, then rebuild."
-                    .to_string();
-            (Manifest::new([], KITSAP_SLICE), base)
-        }
+    let positions = "Ferry positions: Washington State Department of Transportation";
+    let (manifest, credits_base) = match renderer.is_some() {
+        false => (Manifest::new([], KITSAP_SLICE), positions.to_string()),
+        true => match load_index("elevation").await {
+            Ok(index) => {
+                log::info!("terrain: {} tiles available", index.manifest.len());
+                let base = format!("Elevation: {} · {positions}", index.attribution.join(" · "));
+                (index.manifest, base)
+            }
+            Err(e) => {
+                log::warn!("no terrain tiles: {e}");
+                let base =
+                    "No elevation tiles: run <code>mise run tiles:elevation</code>, then rebuild."
+                        .to_string();
+                (Manifest::new([], KITSAP_SLICE), base)
+            }
+        },
     };
     credits.set_inner_html(&credits_base);
     let aspect = canvas.client_width().max(1) as f64 / canvas.client_height().max(1) as f64;
     let app = Rc::new(RefCell::new(App {
         canvas: canvas.clone(),
         renderer,
+        map_lost,
+        no_map: NoMap {
+            root: element("no-map")?,
+            why: element("no-map-why")?,
+            list: element("no-map-list")?,
+            built: String::new(),
+        },
         camera: start_camera(aspect),
         measure: Measure::default(),
         measuring: false,
@@ -203,7 +202,10 @@ pub(super) async fn run() -> Result<(), String> {
         vessels_step_ms: f64::INFINITY,
         hud_vessel: element("hud-vessel")?,
     }));
-    log::info!("renderer ready");
+    match why_no_map {
+        None => log::info!("renderer ready"),
+        Some(why) => app.borrow_mut().lose_map(why),
+    }
 
     listen(&canvas, "pointerdown", &app, |app, e: PointerEvent| {
         app.pointer_down(&e)
@@ -313,6 +315,25 @@ pub(super) async fn run() -> Result<(), String> {
         &app,
         move |app, _: web_sys::Event| app.set_label_debug(label_toggle.checked()),
     );
+    // A boat or route in the list in the map's place comes up in the
+    // finder, as a click on it on the map would.
+    let no_map_list = element("no-map-list")?;
+    listen(&no_map_list, "click", &app, |app, e: web_sys::Event| {
+        let button = e
+            .target()
+            .and_then(|t| t.dyn_into::<Element>().ok())
+            .and_then(|el| el.closest("button").ok().flatten());
+        let number = |name: &str| {
+            (button.as_ref())
+                .and_then(|b| b.get_attribute(name))
+                .and_then(|v| v.parse::<u32>().ok())
+        };
+        if let Some(id) = number("data-vessel") {
+            app.find(Target::Vessel(id));
+        } else if let Some(r) = number("data-route") {
+            app.find(Target::Route(r as usize));
+        }
+    });
     let finder_input = element("finder-input")?;
     listen(&finder_input, "input", &app, |app, _: web_sys::Event| {
         app.search()
@@ -452,6 +473,32 @@ pub(super) async fn run() -> Result<(), String> {
 
     animate(app);
     Ok(())
+}
+
+/// The map's renderer, or why there's none, as the page says it (the
+/// details go to the console).
+async fn start_map(window: &Window, canvas: &HtmlCanvasElement) -> Result<Renderer, &'static str> {
+    if !window.is_secure_context() {
+        return Err("The map needs a secure connection: open this page over https.");
+    }
+    let has_webgpu = js_sys::Reflect::has(&window.navigator(), &"gpu".into()).unwrap_or(false);
+    if !has_webgpu {
+        return Err("The map needs WebGPU, which this browser doesn't offer or has turned off.");
+    }
+    // A page reloaded in a background tab (the dev server does this) waits
+    // until it's shown, and a moment more, before touching the GPU.
+    if page_hidden() {
+        while page_hidden() {
+            sleep_ms(100.0).await;
+        }
+        sleep_ms(TAB_RETURN_GRACE_MS).await;
+    }
+    Renderer::new(canvas.clone(), &KITSAP_SLICE)
+        .await
+        .map_err(|e| {
+            log::warn!("{e}");
+            "The map needs a GPU, and this browser found none it can draw with."
+        })
 }
 
 /// The camera to start with: the view in the page's link (`#at=…`, the

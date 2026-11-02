@@ -13,6 +13,7 @@ mod legend;
 mod live;
 mod measure;
 mod mesh;
+mod no_map;
 mod palette;
 mod perf;
 mod placement;
