@@ -273,8 +273,6 @@ jobs:
     env:
       DATABASE_URL: postgres://ferry:ferry@127.0.0.1:5432/ferry
       CONTAINER: docker
-      IMAGE: ${{ env.REGISTRY }}/ferry-demo:sha-${{ github.sha }}
-      SERVER_IMAGE: ${{ env.REGISTRY }}/ferry-demo-server:sha-${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -285,6 +283,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - run: tools/ci/check_images.sh
+        # Here, not on the job: a job's env can't refer to the workflow's.
+        env:
+          IMAGE: ${{ env.REGISTRY }}/ferry-demo:sha-${{ github.sha }}
+          SERVER_IMAGE: ${{ env.REGISTRY }}/ferry-demo-server:sha-${{ github.sha }}
 
   # The chart for this commit's images, once both are published: version
   # 0.1.<run number>, so each green push to main is one the cluster can
