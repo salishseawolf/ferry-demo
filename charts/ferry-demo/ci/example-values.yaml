@@ -6,6 +6,11 @@ wsdot:
 postgres:
   storage:
     storageClass: example-storage
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: example-object-store
 backup:
   storage:
     storageClass: example-storage

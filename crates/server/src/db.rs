@@ -288,6 +288,22 @@ pub async fn latest_raw(pool: &PgPool, path: &str) -> Result<Option<(i64, String
     Ok(row.map(|r| (r.get("fetched_ms"), r.get("body"))))
 }
 
+/// When the latest useful answer for `path` was recorded (epoch ms): a
+/// success holding a non-empty list, as WSF's live feeds answer, so an
+/// outage that still answers 200 with `[]` or an error object doesn't count.
+pub async fn latest_recorded_ms(pool: &PgPool, path: &str) -> Result<Option<i64>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {FETCHED_MS} AS fetched_ms FROM raw_polls
+         WHERE path = $1 AND status = 200 AND jsonb_typeof(body) = 'array'
+           AND jsonb_array_length(body) > 0
+         ORDER BY fetched_at DESC LIMIT 1"
+    )))
+    .bind(path)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.get("fetched_ms")))
+}
+
 /// Answers for a replay file: every whole answer from the last `minutes`,
 /// plus each path's latest from before then if it has none since (so
 /// rarely fetched data, such as the terminal list, comes along), oldest

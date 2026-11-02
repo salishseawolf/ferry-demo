@@ -1,4 +1,5 @@
-//! The API under `/api/v1/`, and the health checks Kubernetes probes.
+//! The API under `/api/v1/`, the health checks Kubernetes probes, and
+//! `/recording`, for monitoring.
 //!
 //! Every document is serialized once when it changes and served as is,
 //! with a weak ETag (the body may be compressed on the way out), so
@@ -7,7 +8,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -20,6 +21,7 @@ use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 
 use crate::advice;
+use crate::db;
 use crate::live::{Feed, Published};
 use crate::stats;
 use crate::wsf::now_ms;
@@ -37,6 +39,9 @@ const LOADS_LIMIT: u32 = 5;
 const LOADS_MAX_LIMIT: u32 = 50;
 /// Schedules are checked for changes every 10 minutes.
 const SCHEDULE_MAX_AGE_S: u32 = 600;
+/// Boat positions are fetched every 10 s and retried within the minute: an
+/// answer older than this means recording has stopped.
+const RECORDING_MAX_AGE_S: i64 = 120;
 
 /// A document ready to serve: its JSON and its ETag.
 pub struct Doc {
@@ -85,6 +90,10 @@ pub struct AppState {
     pub db_ok: AtomicBool,
     /// The database, for what's computed on request (statistics).
     pub db: std::sync::OnceLock<sqlx::PgPool>,
+    /// Statistics as computed, by request (normalized), with when each
+    /// stops being fresh (epoch ms): each is computed at most once in its
+    /// max-age, however many ask.
+    stats: Mutex<HashMap<String, (i64, Arc<Doc>)>>,
     /// Something the route network carries (a slip's direction) has been
     /// learned: it's worth rebuilding before the daily reload.
     pub network_dirty: tokio::sync::Notify,
@@ -125,6 +134,24 @@ impl AppState {
         self.live[feed.index()].read().unwrap().clone()
     }
 
+    /// The statistics document for `key`, if computed less than its
+    /// max-age ago, and the seconds it stays fresh.
+    fn cached_stats(&self, key: &str) -> Option<(Arc<Doc>, u32)> {
+        let now = now_ms();
+        let stats = self.stats.lock().unwrap();
+        let (fresh_until_ms, doc) = stats.get(key)?;
+        let left_s = (fresh_until_ms - now + 999) / 1000;
+        (left_s > 0).then(|| (doc.clone(), left_s as u32))
+    }
+
+    /// Keeps a statistics document for `max_age_s`; those gone stale go.
+    fn cache_stats(&self, key: String, doc: Arc<Doc>, max_age_s: u32) {
+        let now = now_ms();
+        let mut stats = self.stats.lock().unwrap();
+        stats.retain(|_, (fresh_until_ms, _)| *fresh_until_ms > now);
+        stats.insert(key, (now + i64::from(max_age_s) * 1000, doc));
+    }
+
     fn network(&self) -> Option<Arc<Doc>> {
         self.network.read().unwrap().clone()
     }
@@ -153,6 +180,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(ready))
+        .route("/recording", get(recording))
         .nest("/api/v1", api)
         .layer(CompressionLayer::new())
         .with_state(state)
@@ -215,11 +243,15 @@ async fn crossings(
         let message = format!("days is a whole number from 1 to {}", stats::MAX_DAYS);
         return error(StatusCode::BAD_REQUEST, "bad_request", &message);
     };
+    let key = format!("crossings?route={route}&days={days}");
+    if let Some((doc, left_s)) = state.cached_stats(&key) {
+        return serve(Some(doc), left_s, &headers);
+    }
     let Some(pool) = state.db.get() else {
         return serve(None, 1, &headers);
     };
     match stats::crossings(pool, route, days).await {
-        Ok(Some(found)) => serve(Some(Doc::json(&found)), STATS_MAX_AGE_S, &headers),
+        Ok(Some(found)) => serve_stats(&state, key, Doc::json(&found), &headers),
         Ok(None) => error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -280,11 +312,15 @@ async fn advice_check(
             return error(StatusCode::BAD_REQUEST, "bad_request", &message);
         }
     };
+    let key = format!("advice?days={days}");
+    if let Some((doc, left_s)) = state.cached_stats(&key) {
+        return serve(Some(doc), left_s, &headers);
+    }
     let Some(pool) = state.db.get() else {
         return serve(None, 1, &headers);
     };
     match advice::check(pool, days, now_ms()).await {
-        Ok(found) => serve(Some(Doc::json(&found)), STATS_MAX_AGE_S, &headers),
+        Ok(found) => serve_stats(&state, key, Doc::json(&found), &headers),
         Err(e) => {
             tracing::warn!("advice check: {e:#}");
             error(
@@ -366,11 +402,18 @@ async fn load_stats(
         let message = format!("days is a whole number from 1 to {}", stats::MAX_DAYS);
         return error(StatusCode::BAD_REQUEST, "bad_request", &message);
     };
+    let key = match &scope {
+        stats::LoadScope::Route(route) => format!("loads?route={route}&days={days}"),
+        stats::LoadScope::Vessel(id) => format!("loads?vessel={id}&days={days}"),
+    };
+    if let Some((doc, left_s)) = state.cached_stats(&key) {
+        return serve(Some(doc), left_s, &headers);
+    }
     let Some(pool) = state.db.get() else {
         return serve(None, 1, &headers);
     };
     match stats::load_stats(pool, scope, days).await {
-        Ok(Some(found)) => serve(Some(Doc::json(&found)), STATS_MAX_AGE_S, &headers),
+        Ok(Some(found)) => serve_stats(&state, key, Doc::json(&found), &headers),
         Ok(None) => error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -478,6 +521,46 @@ fn seconds_until(ms: i64) -> u32 {
     (left.max(0) as u64).div_ceil(1000).max(1) as u32
 }
 
+/// Whether boat positions are still being recorded: 200 while the latest
+/// useful answer from WSF is under `RECORDING_MAX_AGE_S` old, 503 with its
+/// age otherwise. For monitoring, not a probe: the server still serves
+/// what it holds while WSF is down. Read from the database, so a recorder
+/// that fetches but can't write fails it too.
+async fn recording(State(state): State<Arc<AppState>>) -> Response {
+    let latest = match state.db.get() {
+        Some(pool) => db::latest_recorded_ms(pool, Feed::Vessels.path()).await,
+        None => Err(anyhow::anyhow!("no database yet")),
+    };
+    let (status, text) = match latest {
+        Ok(Some(ms)) => {
+            let age_s = (now_ms() - ms).max(0) / 1000;
+            if age_s < RECORDING_MAX_AGE_S {
+                (
+                    StatusCode::OK,
+                    format!("recording: boat positions {age_s} s ago"),
+                )
+            } else {
+                let text = format!("not recording: boat positions last {age_s} s ago");
+                (StatusCode::SERVICE_UNAVAILABLE, text)
+            }
+        }
+        Ok(None) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not recording: no boat positions recorded".to_string(),
+        ),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("not recording: the database didn't answer ({e:#})"),
+        ),
+    };
+    (
+        status,
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        text,
+    )
+        .into_response()
+}
+
 /// Ready once the database answers and the route network has loaded.
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
     let db = state.db_ok.load(Ordering::Relaxed);
@@ -500,6 +583,12 @@ async fn not_found() -> Response {
 
 /// `doc`, or a 304 if the client already has it, or a 503 if it hasn't
 /// loaded yet.
+/// A statistics document just computed, kept to serve again while fresh.
+fn serve_stats(state: &AppState, key: String, doc: Arc<Doc>, headers: &HeaderMap) -> Response {
+    state.cache_stats(key, doc.clone(), STATS_MAX_AGE_S);
+    serve(Some(doc), STATS_MAX_AGE_S, headers)
+}
+
 fn serve(doc: Option<Arc<Doc>>, max_age_s: u32, headers: &HeaderMap) -> Response {
     let Some(doc) = doc else {
         return error(
@@ -772,6 +861,86 @@ mod tests {
         ] {
             assert_eq!(get(&state, path, None).await.0, status, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn serves_statistics_again_while_fresh() {
+        // No database: only what's kept can answer.
+        let state = Arc::new(AppState::default());
+        let path = "/api/v1/stats/crossings?route=edmonds-kingston";
+        assert_eq!(
+            get(&state, path, None).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let doc = Doc::json(&serde_json::json!({"route": "edmonds-kingston"}));
+        state.cache_stats("crossings?route=edmonds-kingston&days=30".into(), doc, 300);
+        // The same request however it's written: days as given or by default.
+        for path in [
+            path,
+            "/api/v1/stats/crossings?route=edmonds-kingston&days=030",
+        ] {
+            let (status, headers, body) = get(&state, path, None).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(body.contains("edmonds-kingston"));
+            assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=300");
+        }
+        // A different window is a different document.
+        let other = "/api/v1/stats/crossings?route=edmonds-kingston&days=7";
+        assert_eq!(
+            get(&state, other, None).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Gone once stale.
+        let doc = Doc::json(&serde_json::json!({}));
+        state.cache_stats("advice?days=14".into(), doc, 0);
+        assert!(state.cached_stats("advice?days=14").is_none());
+    }
+
+    #[tokio::test]
+    async fn says_whether_boat_positions_are_being_recorded() {
+        let state = Arc::new(AppState::default());
+        let (status, _, body) = get(&state, "/recording", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("database"), "{body}");
+
+        let Some(db) = crate::db::tests::Scratch::new().await else {
+            eprintln!("DATABASE_URL isn't set: skipping");
+            return;
+        };
+        let _ = state.db.set(db.pool.clone());
+        let path = Feed::Vessels.path();
+        let boats = serde_json::json!([{"VesselID": 1}]);
+        let recorded = |ms: i64, body: serde_json::Value| {
+            let pool = db.pool.clone();
+            async move {
+                crate::db::insert_raw(&pool, path, ms, Some(200), Some(&body), None)
+                    .await
+                    .unwrap();
+            }
+        };
+        let (status, _, body) = get(&state, "/recording", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("no boat positions"), "{body}");
+
+        // Ten minutes ago: stopped since.
+        recorded(now_ms() - 600_000, boats.clone()).await;
+        let (status, headers, body) = get(&state, "/recording", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("last 600 s ago"), "{body}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+
+        // WSF answering, but with nothing in it, isn't recording.
+        recorded(now_ms() - 5_000, serde_json::json!([])).await;
+        assert_eq!(
+            get(&state, "/recording", None).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        recorded(now_ms() - 5_000, boats).await;
+        let (status, _, body) = get(&state, "/recording", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("recording: boat positions 5 s ago"), "{body}");
+        db.finish().await;
     }
 
     #[tokio::test]

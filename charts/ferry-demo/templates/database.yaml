@@ -14,6 +14,10 @@ metadata:
 spec:
   instances: {{ .Values.postgres.instances }}
   imageName: {{ .Values.postgres.imageName }}
+  # CloudNativePG's PodDisruptionBudget keeps the primary up, which with
+  # one instance means a drain of its node waits forever. By default it's
+  # only kept with replicas to switch the primary to.
+  enablePDB: {{ if kindIs "bool" .Values.postgres.enablePDB }}{{ .Values.postgres.enablePDB }}{{ else }}{{ gt (int .Values.postgres.instances) 1 }}{{ end }}
   bootstrap:
     initdb:
       # As the dev environment's, so a dev:dump restores into it.
@@ -30,3 +34,7 @@ spec:
     {{- end }}
   resources:
     {{- toYaml .Values.postgres.resources | nindent 4 }}
+  {{- with .Values.postgres.plugins }}
+  plugins:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

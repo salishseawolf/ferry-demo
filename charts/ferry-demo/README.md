@@ -37,6 +37,12 @@ spec:
 
 The database Cluster and the backups' volume are marked so that neither an uninstall nor an Argo CD prune deletes them: deleting the Cluster would delete `raw_polls`, which nothing can bring back.
 
+## Monitoring
+
+The server's Service (port 8090) answers, besides the probes' `/healthz` and `/readyz`:
+
+- `/recording`: 200 while boat positions were last recorded under 2 minutes ago, 503 with their age otherwise ("not recording: boat positions last 312 s ago"). It reads the database, so it fails when WSF stops answering usefully (an outage, a revoked key, an empty answer) and when answers can't be written. It isn't a probe: while it fails, the server still serves what it holds. nginx doesn't pass it on, so it isn't public.
+
 ## First deploy, starting from the dev database
 
 So the record starts when dev's did, not on deployment day:
