@@ -13,7 +13,7 @@ SERVER_IMAGE = "{{ get_env(name='SERVER_IMAGE', default='localhost/ferry-demo-se
 # The 1Password reference, which `op run` resolves; a value already set (by
 # `op run`, or a container's environment) is kept, so tools run through
 # mise's shims see the resolved code.
-WSDOT_API_KEY = "{{ get_env(name='WSDOT_API_KEY', default='op://425dp2cwyte4u6pujsglwpttbq/x3yvm7ynhpkhahlhwcvjdwqczm/access_code') }}"
+WSDOT_API_KEY = "{{ get_env(name='WSDOT_API_KEY', default='op://K3s Service Cluster/WSDOT Traveler API/access_code') }}"
 
 [tasks.claude]
 description = "Start the Claude Code container for the project."
