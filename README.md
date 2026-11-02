@@ -19,6 +19,7 @@ A live map of Washington State Ferries on a 3D globe of Puget Sound, written in 
 | `src/` | The app: Rust compiled to WebAssembly, rendering with wgpu (WebGPU). Terrain comes from pre-built tiles; the panels are plain HTML over the canvas. |
 | `crates/server` | The server (axum, sqlx, Postgres): polls WSF's API, keeps every answer, derives trips, car space and loads from them, works out arrival advice, and serves the app's API under `/api/v1/`. |
 | `crates/model` | What the two share: the API's documents, geodesy, the route network. |
+| `charts/ferry-demo` | The Helm chart that deploys it all to Kubernetes: see its [README](charts/ferry-demo/README.md). |
 | `tools/` | The pipelines behind the terrain tiles and the ferry routes (from OpenStreetMap). |
 
 The server records WSF's raw answers in Postgres and derives everything else from them, so history can be rebuilt as the derivations improve (`ferry-server rebuild`). Arrival advice comes from a daily job (`ferry-server compute-advice`) that stores each terminal's history, from which the server publishes fresh advice every minute.
@@ -46,6 +47,7 @@ Other tasks:
 | `mise run dev:offline` | The app with no network or access code, against a stand-in for WSF's API (`tools/dev/offline/`); `DUMP=` starts from a database dump |
 | `mise run dev:smoke` | An end-to-end check of the running app in headless Chromium |
 | `mise run dev:shot -- OUT.png` | A screenshot of the running app (`--phone`, `--find TEXT`, `--at LAT,LON,ALT_M`) |
+| `mise run chart:lint` | Lint the Helm chart and check what it renders against the Kubernetes and CRD schemas |
 
 ## Images
 
@@ -54,6 +56,8 @@ Every push to `main` that passes CI publishes the release images, with build pro
 - `ghcr.io/salishseawolf/ferry-demo`: the app (nginx), terrain tiles included
 - `ghcr.io/salishseawolf/ferry-demo-server`: the server
 - `ghcr.io/salishseawolf/ferry-demo-tiles`: the terrain tiles, published from the machine with the source data (`mise run tiles:publish`)
+
+Then it publishes the Helm chart for those two images, `oci://ghcr.io/salishseawolf/charts/ferry-demo`, which a cluster's Argo CD deploys.
 
 ## Data
 

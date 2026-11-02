@@ -1,0 +1,11 @@
+apiVersion: v2
+name: ferry-demo
+description: A live map of Washington State Ferries on a 3D globe, with its server and Postgres
+type: application
+# CI publishes each main commit as 0.1.<run number>, with appVersion set to
+# the commit's image tag (sha-<commit>); these are for local renders only.
+version: 0.1.0
+appVersion: main
+home: https://github.com/salishseawolf/ferry-demo
+sources:
+  - https://github.com/salishseawolf/ferry-demo

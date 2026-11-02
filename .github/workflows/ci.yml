@@ -2,8 +2,9 @@
 # locally (mise.toml), so a green run means what `mise run check`, `mise
 # run test` and `mise run build` mean. On main, once every check passes,
 # it publishes the release images to ghcr.io: the server's and the app's,
-# each tagged with its commit and `main`, with a provenance attestation.
-# Deploying is left to the cluster.
+# each tagged with its commit and `main`, with a provenance attestation;
+# then the Helm chart that deploys those two images. Deploying is left to
+# the cluster.
 name: CI
 
 on:
@@ -109,10 +110,23 @@ jobs:
           shared-key: build
       - run: mise run build
 
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.3
+          install_args: helm@4.3.1 kubeconform@0.8.0
+      - run: mise run chart:lint
+
   server-image:
     name: Server image
     # Only what passed every check is published, and only from main.
-    needs: [lint, test, build]
+    needs: [lint, test, build, chart]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
@@ -172,7 +186,7 @@ jobs:
 
   web-image:
     name: App image
-    needs: [lint, test, build]
+    needs: [lint, test, build, chart]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
@@ -229,3 +243,33 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/ferry-demo
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  # The chart for this commit's images, once both are published: version
+  # 0.1.<run number>, so each green push to main is one the cluster can
+  # pin, and newer ones sort after it.
+  chart-publish:
+    name: Publish the Helm chart
+    needs: [server-image, web-image]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.3
+          install_args: helm@4.3.1
+      - name: Log in to ghcr.io
+        run: echo "$TOKEN" | mise x helm@4.3.1 -- helm registry login ghcr.io -u "$ACTOR" --password-stdin
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+      - run: mise run chart:publish
+        env:
+          VERSION: 0.1.${{ github.run_number }}
+          # The images' tag (docker/metadata-action's type=sha,format=long).
+          APP_VERSION: sha-${{ github.sha }}

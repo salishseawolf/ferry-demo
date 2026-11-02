@@ -1,0 +1,125 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ferry.name" . }}-advice
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.advice.schedule | quote }}
+  timeZone: America/Los_Angeles
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            {{- include "ferry.selector" (list . "advice") | nindent 12 }}
+        spec:
+          {{- include "ferry.serverJob" (list . "compute-advice" (dict "requests" (dict "cpu" "100m" "memory" "128Mi") "limits" (dict "memory" "512Mi"))) | nindent 10 }}
+---
+# Derives all history again from raw_polls (`ferry-server rebuild`), after
+# a fix to how it's derived. Never runs on its own: it's started by hand,
+# with the server stopped (see the chart's README).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ferry.name" . }}-rebuild
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  schedule: "0 0 1 1 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "ferry.selector" (list . "rebuild") | nindent 12 }}
+        spec:
+          {{- include "ferry.serverJob" (list . "rebuild" (dict "requests" (dict "cpu" "500m" "memory" "256Mi") "limits" (dict "memory" "2Gi"))) | nindent 10 }}
+{{- if .Values.backup.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ferry.name" . }}-backup
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: America/Los_Angeles
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "ferry.selector" (list . "backup") | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            # The Postgres image's user.
+            runAsNonRoot: true
+            runAsUser: 26
+            runAsGroup: 26
+            fsGroup: 26
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: backup
+              # The database's own image, for a pg_dump of its version.
+              image: {{ .Values.postgres.imageName }}
+              command:
+                - bash
+                - -c
+                - |
+                  set -euo pipefail
+                  f="/backups/ferry-$(date -u +%Y%m%dT%H%MZ).dump"
+                  pg_dump -d "$DATABASE_URL" -Fc -Z 6 -f "$f.part"
+                  mv "$f.part" "$f"
+                  ls -1t /backups/ferry-*.dump | tail -n +$((KEEP + 1)) | xargs -r rm --
+                  ls -lh /backups
+              env:
+                {{- include "ferry.databaseUrl" . | nindent 16 }}
+                - name: KEEP
+                  value: {{ .Values.backup.keep | quote }}
+              resources:
+                requests: { cpu: 100m, memory: 64Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                {{- include "ferry.containerSecurity" . | nindent 16 }}
+              volumeMounts:
+                - { name: backups, mountPath: /backups }
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ include "ferry.name" . }}-backups
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ferry.name" . }}-backups
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    # Neither uninstalling nor Argo CD's pruning removes the dumps.
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.backup.storage.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size }}
+{{- end }}

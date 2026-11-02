@@ -1,0 +1,32 @@
+# The database. CloudNativePG makes the owner's Secret, <name>-db-app,
+# whose `uri` the server and jobs connect with.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "ferry.name" . }}-db
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    # Deleting the Cluster deletes its volumes, raw_polls and all: never
+    # on an uninstall or an Argo CD prune.
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+spec:
+  instances: {{ .Values.postgres.instances }}
+  imageName: {{ .Values.postgres.imageName }}
+  bootstrap:
+    initdb:
+      # As the dev environment's, so a dev:dump restores into it.
+      database: ferry
+      owner: ferry
+      {{- with .Values.postgres.locale }}
+      localeCollate: {{ . }}
+      localeCType: {{ . }}
+      {{- end }}
+  storage:
+    size: {{ .Values.postgres.storage.size }}
+    {{- with .Values.postgres.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}

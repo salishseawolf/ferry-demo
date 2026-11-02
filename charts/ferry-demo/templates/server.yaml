@@ -1,0 +1,84 @@
+{{- if gt (int .Values.server.replicas) 1 }}
+{{- fail "server.replicas is 0 or 1: each server polls WSF and records what it sees" }}
+{{- end }}
+# The server (crates/server): polls WSF, records every answer, derives
+# history from them and serves the app's API under /api/v1/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferry.name" . }}-server
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicas }}
+  # Never two at once, even for a moment: both would record.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ferry.selector" (list . "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ferry.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      securityContext:
+        {{- include "ferry.serverPodSecurity" . | nindent 8 }}
+      containers:
+        - name: server
+          image: {{ include "ferry.serverImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            {{- include "ferry.databaseUrl" . | nindent 12 }}
+            - name: WSDOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ferry.name" . }}-wsdot
+                  key: {{ .Values.wsdot.field }}
+            - name: RUST_LOG
+              value: {{ .Values.server.logLevel | quote }}
+          ports:
+            - name: http
+              containerPort: 8090
+          # Ready once the database answers and the route network is
+          # loaded; a fresh database takes about a minute.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          securityContext:
+            {{- include "ferry.containerSecurity" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ferry.name" . }}-server
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  selector:
+    {{- include "ferry.selector" (list . "server") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+---
+apiVersion: onepassword.com/v1
+kind: OnePasswordItem
+metadata:
+  name: {{ include "ferry.name" . }}-wsdot
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  itemPath: {{ required "wsdot.itemPath is the 1Password item with the WSDOT access code (vaults/<vault>/items/<item>)" .Values.wsdot.itemPath | quote }}

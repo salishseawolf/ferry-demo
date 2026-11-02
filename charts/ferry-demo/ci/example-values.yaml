@@ -1,0 +1,17 @@
+# What a cluster's values look like, and what `mise run chart:lint` and CI
+# render the chart with.
+host: ferries.example.org
+wsdot:
+  itemPath: vaults/example-vault/items/wsdot-traveler-api
+postgres:
+  storage:
+    storageClass: example-storage
+backup:
+  storage:
+    storageClass: example-storage
+ingress:
+  tls:
+    certResolver: example-resolver
+  middlewares:
+    - name: example-headers
+      namespace: traefik

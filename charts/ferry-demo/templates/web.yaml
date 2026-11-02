@@ -1,0 +1,100 @@
+# The app (nginx): the static files and terrain tiles, with /api/v1/ passed
+# to the server's Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferry.name" . }}-web
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ferry.selector" (list . "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ferry.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      securityContext:
+        # nginx-unprivileged's user.
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: {{ include "ferry.webImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: FERRY_API
+              value: {{ include "ferry.name" . }}-server:8090
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          securityContext:
+            {{- include "ferry.containerSecurity" . | nindent 12 }}
+          # The only places nginx writes: the config its entrypoint fills
+          # in from the template, and its pid and temporary files.
+          volumeMounts:
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: conf, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ferry.name" . }}-web
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  selector:
+    {{- include "ferry.selector" (list . "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "ferry.name" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.ingress.entryPoints | nindent 4 }}
+  routes:
+    - kind: Rule
+      match: Host(`{{ required "host is the app's address" .Values.host }}`)
+      {{- with .Values.ingress.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ include "ferry.name" . }}-web
+          port: 8080
+  {{- with .Values.ingress.tls }}
+  {{- if or .certResolver .secretName }}
+  tls:
+    {{- if .certResolver }}
+    certResolver: {{ .certResolver }}
+    {{- end }}
+    {{- if .secretName }}
+    secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  {{- end }}
