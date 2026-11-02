@@ -144,21 +144,25 @@ description = "Check the Helm chart (charts/ferry-demo): lint it, render it with
 # community catalog, pinned to a commit.
 tools = { helm = "4.3.1", kubeconform = "0.8.0" }
 run = '''
-set -euo pipefail
+set -eu
 chart=charts/ferry-demo
 values=$chart/ci/example-values.yaml
 helm lint --strict "$chart" -f "$values"
 # kubeconform's own placeholders, kept raw from mise's templating.
 crds='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{% raw %}{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}{% endraw %}.json'
-helm template ferry-demo "$chart" -f "$values" \
-  | kubeconform -strict -summary -schema-location default -schema-location "$crds"
+# Through a file, not a pipe: mise runs this with sh, which has no
+# pipefail, and kubeconform passes an empty render.
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+helm template ferry-demo "$chart" -f "$values" > "$out"
+kubeconform -strict -summary -schema-location default -schema-location "$crds" < "$out"
 '''
 
 [tasks."chart:publish"]
 description = "Package the Helm chart and push it to ghcr.io (CI does this on main: VERSION=0.1.N APP_VERSION=sha-<commit>)"
 tools = { helm = "4.3.1" }
 run = '''
-set -euo pipefail
+set -eu
 out=$(mktemp -d)
 helm package charts/ferry-demo --version "$VERSION" --app-version "$APP_VERSION" -d "$out"
 helm push "$out"/ferry-demo-"$VERSION".tgz oci://ghcr.io/salishseawolf/charts
