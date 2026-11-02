@@ -81,6 +81,10 @@ FROM ${TILES} AS tiles
 FROM docker.io/nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6 AS web
 # Filled in at startup with the server's host:port (FERRY_API: by default
 # the same pod, as a Kubernetes sidecar would be).
+# Made first: a directory COPY --chmod creates gets the file's mode under
+# BuildKit (CI's builds), 644, which nginx's user can't enter. Podman's
+# builds don't, so only the published image showed it.
+RUN mkdir -p /etc/nginx/templates
 COPY --chmod=644 nginx.conf /etc/nginx/templates/default.conf.template
 ENV NGINX_ENVSUBST_FILTER=^FERRY_ \
     FERRY_API=127.0.0.1:8090

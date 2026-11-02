@@ -1,6 +1,7 @@
 # What the cluster sets in its Argo CD Application. `host` and
 # `wsdot.itemPath` have no defaults; the rest are the defaults the app was
-# sized for.
+# sized for. Every container has CPU and memory limits, so a namespace's
+# LimitRange defaults never apply to them.
 
 # The app's address, for the IngressRoute.
 host: ""
@@ -22,13 +23,13 @@ server:
   logLevel: info
   resources:
     requests: { cpu: 100m, memory: 256Mi }
-    limits: { memory: 1Gi }
+    limits: { cpu: "1", memory: 1Gi }
 
 web:
   replicas: 1
   resources:
     requests: { cpu: 20m, memory: 32Mi }
-    limits: { memory: 128Mi }
+    limits: { cpu: 500m, memory: 128Mi }
 
 # The WSDOT Traveler API access code, from 1Password (the 1Password
 # Operator makes a Secret of the item).
@@ -53,7 +54,7 @@ postgres:
     storageClass: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
-    limits: { memory: 1Gi }
+    limits: { cpu: "1", memory: 1Gi }
 
 ingress:
   entryPoints: [websecure]

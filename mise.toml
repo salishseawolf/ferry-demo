@@ -6,8 +6,10 @@ rust = { version = "1.99.0", targets = "wasm32-unknown-unknown", components = "c
 python = "3.13"
 
 [env]
-IMAGE = "localhost/ferry-demo:dev"
-SERVER_IMAGE = "localhost/ferry-demo-server:dev"
+# The images container:build makes and container:run and container:check
+# use; a value already set (CI's published images, say) is kept.
+IMAGE = "{{ get_env(name='IMAGE', default='localhost/ferry-demo:dev') }}"
+SERVER_IMAGE = "{{ get_env(name='SERVER_IMAGE', default='localhost/ferry-demo-server:dev') }}"
 # The 1Password reference, which `op run` resolves; a value already set (by
 # `op run`, or a container's environment) is kept, so tools run through
 # mise's shims see the resolved code.
@@ -128,6 +130,10 @@ run = [
   "podman build --target web ${TILES_IMAGE:+--build-arg TILES=$TILES_IMAGE} -t $IMAGE -f Containerfile .",
   "podman build --target server -t $SERVER_IMAGE -f Containerfile .",
 ]
+
+[tasks."container:check"]
+description = "Run the release images as the Helm chart's pods do (users, read-only root) and check they answer: needs DATABASE_URL (tools/ci/check_images.sh)"
+run = "tools/ci/check_images.sh"
 
 [tasks."container:run"]
 description = "Run the release images with Postgres (compose.release.yaml) on http://localhost:8080"

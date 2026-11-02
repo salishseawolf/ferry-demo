@@ -19,7 +19,7 @@ spec:
           labels:
             {{- include "ferry.selector" (list . "advice") | nindent 12 }}
         spec:
-          {{- include "ferry.serverJob" (list . "compute-advice" (dict "requests" (dict "cpu" "100m" "memory" "128Mi") "limits" (dict "memory" "512Mi"))) | nindent 10 }}
+          {{- include "ferry.serverJob" (list . "compute-advice" (dict "requests" (dict "cpu" "100m" "memory" "128Mi") "limits" (dict "cpu" "1" "memory" "512Mi"))) | nindent 10 }}
 ---
 # Derives all history again from raw_polls (`ferry-server rebuild`), after
 # a fix to how it's derived. Never runs on its own: it's started by hand,
@@ -42,7 +42,7 @@ spec:
           labels:
             {{- include "ferry.selector" (list . "rebuild") | nindent 12 }}
         spec:
-          {{- include "ferry.serverJob" (list . "rebuild" (dict "requests" (dict "cpu" "500m" "memory" "256Mi") "limits" (dict "memory" "2Gi"))) | nindent 10 }}
+          {{- include "ferry.serverJob" (list . "rebuild" (dict "requests" (dict "cpu" "500m" "memory" "256Mi") "limits" (dict "cpu" "2" "memory" "2Gi"))) | nindent 10 }}
 {{- if .Values.backup.enabled }}
 ---
 apiVersion: batch/v1
@@ -94,7 +94,7 @@ spec:
                   value: {{ .Values.backup.keep | quote }}
               resources:
                 requests: { cpu: 100m, memory: 64Mi }
-                limits: { memory: 512Mi }
+                limits: { cpu: "1", memory: 512Mi }
               securityContext:
                 {{- include "ferry.containerSecurity" . | nindent 16 }}
               volumeMounts:

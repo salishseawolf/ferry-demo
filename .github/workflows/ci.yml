@@ -3,8 +3,8 @@
 # run test` and `mise run build` mean. On main, once every check passes,
 # it publishes the release images to ghcr.io: the server's and the app's,
 # each tagged with its commit and `main`, with a provenance attestation;
-# then the Helm chart that deploys those two images. Deploying is left to
-# the cluster.
+# then, once both run as the chart runs them, the Helm chart that deploys
+# them. Deploying is left to the cluster.
 name: CI
 
 on:
@@ -244,12 +244,54 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+  # The published images, run as the chart's pods run them (as their users,
+  # read-only root, only the chart's emptyDirs writable): what the chart's
+  # lint can't see, such as a file nginx's user can't read. Only images that
+  # pass get a chart.
+  image-check:
+    name: Images run as the chart runs them
+    needs: [server-image, web-image]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    services:
+      postgres:
+        image: docker.io/library/postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+        env:
+          POSTGRES_USER: ferry
+          POSTGRES_PASSWORD: ferry
+          POSTGRES_DB: ferry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ferry -d ferry"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://ferry:ferry@127.0.0.1:5432/ferry
+      CONTAINER: docker
+      IMAGE: ${{ env.REGISTRY }}/ferry-demo:sha-${{ github.sha }}
+      SERVER_IMAGE: ${{ env.REGISTRY }}/ferry-demo-server:sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: tools/ci/check_images.sh
+
   # The chart for this commit's images, once both are published: version
   # 0.1.<run number>, so each green push to main is one the cluster can
   # pin, and newer ones sort after it.
   chart-publish:
     name: Publish the Helm chart
-    needs: [server-image, web-image]
+    needs: [image-check]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
