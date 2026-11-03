@@ -239,4 +239,79 @@ async function checkSheet(page, check, size) {
   await cdp.detach();
 }
 
-module.exports = { checkTouch, checkSheet };
+// Momentum (web/gestures.rs), by finger on a phone and by mouse on a
+// desk: a swipe glides on and stops, one that rests before letting go
+// doesn't, and a press during a glide stops it without picking anything.
+async function checkGlide(page, check, size, phone) {
+  const cdp = await page.createCDPSession();
+  const [w, h] = await page.evaluate(() => [innerWidth, innerHeight]);
+  // No matches, so no sheet over the map (checkTouch's last tap opens one).
+  await page.evaluate(() => {
+    const input = document.getElementById("finder-input");
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    input.blur();
+  });
+  await page.evaluate(() => document.getElementById("debug").click());
+  await wait(500);
+  // Clear of the debug panel: below it on a phone, left of it on a desk.
+  const below = await page.evaluate(() => document.getElementById("perf").getBoundingClientRect().bottom);
+  const y = phone ? below + (h - 60 - below) / 2 : h / 2;
+  const x0 = phone ? 60 : w / 2 - 300;
+  // Zoomed in, so a swipe has room to glide before the area's edge.
+  await page.mouse.move(x0 + 100, y);
+  await page.mouse.wheel({ deltaY: -1500 });
+  await wait(300);
+  const down = async (x) =>
+    phone
+      ? cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 0 }] })
+      : page.mouse.move(x, y).then(() => page.mouse.down());
+  const move = async (x) =>
+    phone
+      ? cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y, id: 0 }] })
+      : page.mouse.move(x, y);
+  const up = async () =>
+    phone ? cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }) : page.mouse.up();
+  // 120 px right in 16 ms steps (about 1.2 px/ms), resting `rest` ms
+  // before letting go.
+  const swipe = async (rest = 0) => {
+    await down(x0);
+    for (let i = 1; i <= 6; i++) {
+      await move(x0 + 20 * i);
+      await wait(16);
+    }
+    if (rest) await wait(rest);
+    await up();
+  };
+  const px = (a, b) => Math.hypot(...moved(a, b)) / b.mPerPx;
+  const selected = () => page.evaluate(() => document.getElementById("finder-input").value);
+
+  let v0 = await view(page);
+  await swipe();
+  await wait(1500);
+  const v1 = await view(page);
+  await wait(500);
+  const v2 = await view(page);
+  check(`${size}: a swipe glides on`, px(v0, v1) > 200, `${px(v0, v1).toFixed(0)} px for a 120 px swipe`);
+  check(`${size}: and stops`, px(v1, v2) < 1, `${px(v1, v2).toFixed(1)} px more`);
+
+  v0 = await view(page);
+  await swipe(150);
+  const rested = px(v0, await view(page));
+  check(`${size}: a swipe that rests doesn't glide`, Math.abs(rested - 120) < 6, `${rested.toFixed(0)} px`);
+
+  const before = await selected();
+  await swipe();
+  await wait(80);
+  await down(x0 + 200);
+  await up();
+  const v3 = await view(page);
+  await wait(600);
+  const caught = px(v3, await view(page));
+  check(`${size}: a press stops a glide`, caught < 1, `${caught.toFixed(1)} px after`);
+  check(`${size}: and picks nothing`, (await selected()) === before);
+  await page.evaluate(() => document.getElementById("debug").click());
+  await cdp.detach();
+}
+
+module.exports = { checkTouch, checkSheet, checkGlide };

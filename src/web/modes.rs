@@ -205,6 +205,7 @@ pub(super) fn switch(app: Rc<RefCell<App>>, flat: bool) {
         // one looks any more.
         a.map_lost = Arc::default();
         a.renderer = None;
+        a.glide = None;
         a.press = None;
         a.cursor = None;
         match fresh_canvas(&a.canvas) {

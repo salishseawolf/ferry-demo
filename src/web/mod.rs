@@ -56,7 +56,7 @@ use debug::Perf;
 use dom::{clock, date_clock, now_ms, page_hidden, request_frame, show_error};
 use fetches::Fetches;
 use fit::Flight;
-use gestures::Press;
+use gestures::{Glide, Press};
 use hex::HexGrid;
 use labels::Labels;
 use map::Map;
@@ -298,6 +298,8 @@ struct App {
     /// pointer) and acts on it; a touch has no pointer to find it by.
     pending_click: Option<((f64, f64), bool)>,
     flight: Option<Flight>,
+    /// The map gliding on after a swipe (web/gestures.rs).
+    glide: Option<Glide>,
     /// The finder at the top, and whether the data behind its selection's
     /// details has changed since they were shown.
     finder: Finder,
@@ -386,6 +388,7 @@ impl App {
             self.set_pose(pose);
             self.redraw = true;
         }
+        self.glide_on(time_ms);
         let paused = page_hidden() || start < self.resume_at_ms;
         if self.layers & LAYER_FERRIES != 0 && !paused {
             self.network_feed.poll(time_ms);
@@ -1009,6 +1012,7 @@ impl App {
     fn wheel(&mut self, e: &WheelEvent) {
         self.redraw = true;
         self.flight = None;
+        self.glide = None;
         e.prevent_default();
         // deltaMode 1 is lines; treat a line as about 16 px.
         let px = e.delta_y() * if e.delta_mode() == 1 { 16.0 } else { 1.0 };

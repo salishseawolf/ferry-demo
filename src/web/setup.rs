@@ -134,6 +134,7 @@ pub(super) async fn run() -> Result<(), String> {
         press: None,
         touch: false,
         empty_tap: None,
+        glide: None,
         sheet_drag: None,
         sheet_dragged: false,
         legend: element("legend")?,

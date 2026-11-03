@@ -177,6 +177,22 @@ impl MapCamera {
         self.drag_to(held, ndc_x, ndc_y);
     }
 
+    /// Moves the view `by` meters on the map (east, north), as far as the
+    /// area lets it; says whether it went all the way.
+    pub fn pan_by(&mut self, by: DVec2) -> bool {
+        let want = self.center() + by;
+        // Off the planet altogether: toward its edge, which set_focus
+        // brings back over the area.
+        let p = self.projection.point_at(want).or_else(|| {
+            self.projection
+                .point_at(want.normalize_or_zero() * self.radius * 0.999)
+        });
+        if let Some(p) = p {
+            self.set_focus(p);
+        }
+        (self.center() - want).length() < 1e-3
+    }
+
     /// A pinch: the view at `altitude_m` (within the limits), with the
     /// surface point `grabbed` (a unit vector) under normalized device
     /// coordinates (x, y), the fingers' midpoint. Set from where the pinch
@@ -379,6 +395,18 @@ mod tests {
         cam.pinch(grabbed, 1.0, 0.1, 0.1);
         assert!((cam.altitude - MIN_ALTITUDE_RADII * EARTH_RADIUS_M).abs() < 1e-6);
         assert!(close(cam.surface_at(0.1, 0.1).unwrap(), grabbed));
+    }
+
+    #[test]
+    fn panning_moves_the_view_until_the_edge() {
+        let mut cam = camera(AREA.center, 30_000.0);
+        let start = cam.center();
+        assert!(cam.pan_by(DVec2::new(1_000.0, -500.0)));
+        assert!((cam.center() - start - DVec2::new(1_000.0, -500.0)).length() < 1e-3);
+        // Far past the edge: stopped there, and says so.
+        assert!(!cam.pan_by(DVec2::new(1e7, 0.0)));
+        let edge = AREA.angle().sin() * EARTH_RADIUS_M - cam.half_diagonal_m();
+        assert!((cam.center().length() - edge).abs() < 1.0);
     }
 
     #[test]

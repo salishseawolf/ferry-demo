@@ -165,6 +165,7 @@ impl App {
         let Some(to) = self.fit_pose(points) else {
             return false;
         };
+        self.glide = None;
         if prefers_reduced_motion() {
             self.set_pose(to);
         } else {

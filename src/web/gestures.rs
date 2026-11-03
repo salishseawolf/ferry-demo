@@ -1,15 +1,17 @@
-//! The map's pointer gestures: one pointer drags the map, two pinch it
-//! (zooming about their midpoint and moving with it), a press that stays
-//! put is a click, and a double tap on nothing zooms in. Fingers get more
-//! room than a mouse: to wobble in a tap, and to pick what they're on.
+//! The map's pointer gestures: one pointer drags the map, and a swipe
+//! lets it glide on, slowing; two pinch it (zooming about their midpoint
+//! and moving with it); a press that stays put is a click, and a double
+//! tap on nothing zooms in. Fingers get more room than a mouse: to wobble
+//! in a tap, and to pick what they're on.
 
 use std::f64::consts::LN_2;
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
+use wasm_bindgen::JsCast;
 use web_sys::PointerEvent;
 
 use super::App;
-use super::dom::now_ms;
+use super::dom::{now_ms, prefers_reduced_motion};
 
 /// A press that moves less than this (CSS px) is a click, not a drag:
 /// with a mouse, and with a finger.
@@ -25,6 +27,18 @@ const ROUTE_TAP_PX: f64 = 16.0;
 /// first zooms in, twice as far.
 const DOUBLE_TAP_MS: f64 = 300.0;
 const DOUBLE_TAP_PX: f64 = 24.0;
+/// A drag let go of while moving glides on: at the pointer's speed over
+/// its last `GLIDE_SPEED_OVER_MS`, unless it rested `GLIDE_REST_MS` before
+/// letting go or went slower than `GLIDE_MIN_SPEED` (CSS px/ms), and no
+/// faster than `GLIDE_MAX_SPEED`. Its speed falls by e every
+/// `GLIDE_DECAY_MS`, so it goes on about that long times its speed, and
+/// it stops below `GLIDE_STOP_SPEED`.
+const GLIDE_SPEED_OVER_MS: f64 = 80.0;
+const GLIDE_REST_MS: f64 = 60.0;
+const GLIDE_MIN_SPEED: f64 = 0.3;
+const GLIDE_MAX_SPEED: f64 = 3.0;
+const GLIDE_DECAY_MS: f64 = 300.0;
+const GLIDE_STOP_SPEED: f64 = 0.02;
 
 /// The pointers down on the map (one or two; a third is ignored), and
 /// what they hold.
@@ -32,9 +46,21 @@ pub(super) struct Press {
     pointers: Vec<(i32, (f64, f64))>,
     /// Where the first came down (CSS px), which a click is at.
     pub(super) start: (f64, f64),
-    /// Moved past the slop, or ever pinched: not a click.
+    /// Moved past the slop, ever pinched, or caught the map gliding: not
+    /// a click.
     pub(super) dragging: bool,
+    pinched: bool,
     hold: Hold,
+    /// A lone pointer's latest positions (CSS px), with when (ms), for
+    /// its speed when it lets go.
+    trail: Vec<(f64, (f64, f64))>,
+}
+
+/// The map gliding on after a swipe: its speed (CSS px/ms, right and down
+/// as the pointer went), and the time (ms) it was last moved to.
+pub(super) struct Glide {
+    velocity: DVec2,
+    at_ms: f64,
 }
 
 enum Hold {
@@ -94,6 +120,8 @@ impl App {
     pub(super) fn pointer_down(&mut self, e: &PointerEvent) {
         self.redraw = true;
         self.flight = None;
+        // A press stops a glide, and is no tap: as a phone's lists do.
+        let caught = self.glide.take().is_some();
         if e.button() != 0 {
             return;
         }
@@ -110,15 +138,18 @@ impl App {
             Some(mut press) => {
                 press.pointers.retain(|&(p, _)| p != id);
                 press.pointers.push((id, pos));
-                // Two fingers make no click.
-                press.dragging |= press.pointers.len() > 1;
+                // Two fingers make no click, nor glide.
+                press.pinched |= press.pointers.len() > 1;
+                press.dragging |= press.pinched;
                 press
             }
             None => Press {
                 pointers: vec![(id, pos)],
                 start: pos,
-                dragging: false,
+                dragging: caught,
+                pinched: false,
                 hold: Hold::Drag(None),
+                trail: Vec::new(),
             },
         };
         let _ = self.canvas.set_pointer_capture(id);
@@ -147,6 +178,27 @@ impl App {
             return;
         };
         pointer.1 = pos;
+        if press.pointers.len() == 1 {
+            // Each move since the last event: a busy page gets them merged
+            // into one per frame.
+            let moves = e.get_coalesced_events();
+            let merged =
+                (0..moves.length()).filter_map(|i| moves.get(i).dyn_into::<PointerEvent>().ok());
+            for m in merged.chain((moves.length() == 0).then(|| e.clone())) {
+                press
+                    .trail
+                    .push((m.time_stamp(), (m.offset_x() as f64, m.offset_y() as f64)));
+            }
+            // The last over the time its speed is taken, and one before.
+            let now = e.time_stamp();
+            let recent = press
+                .trail
+                .iter()
+                .filter(|&&(t, _)| now - t <= GLIDE_SPEED_OVER_MS)
+                .count();
+            let excess = press.trail.len().saturating_sub(recent + 1);
+            press.trail.drain(..excess);
+        }
         press.dragging |= spread(pos, press.start) > slop;
         if !press.dragging {
             return;
@@ -176,7 +228,7 @@ impl App {
     }
 
     /// A pointer lifted. The last one up ends the press: a click if it
-    /// never dragged.
+    /// never dragged, or else maybe a glide.
     pub(super) fn pointer_up(&mut self, e: &PointerEvent) {
         self.redraw = true;
         if e.button() != 0 {
@@ -186,6 +238,7 @@ impl App {
             return;
         };
         if press.dragging {
+            self.glide = glide_from(&press, e.time_stamp());
             return;
         }
         // A click on the map first closes an open note.
@@ -249,9 +302,59 @@ impl App {
         None
     }
 
+    /// Moves a glide on to frame time `time_ms`, ending it once it's
+    /// slow, or the view reaches the edge of the area.
+    pub(super) fn glide_on(&mut self, time_ms: f64) {
+        let Some(glide) = &mut self.glide else {
+            return;
+        };
+        // A frame long late (a tab hidden, say) doesn't leap.
+        let dt = (time_ms - glide.at_ms).clamp(0.0, 100.0);
+        glide.at_ms = time_ms;
+        let decay = (-dt / GLIDE_DECAY_MS).exp();
+        let px = glide.velocity * GLIDE_DECAY_MS * (1.0 - decay);
+        glide.velocity *= decay;
+        let slow = glide.velocity.length() < GLIDE_STOP_SPEED;
+        let m_per_px = self
+            .camera
+            .m_per_px(f64::from(self.canvas.client_height().max(1)));
+        // The map moves with the pointer: right and down on the screen,
+        // so the view goes west and north.
+        let whole = self.camera.pan_by(DVec2::new(-px.x, px.y) * m_per_px);
+        if slow || !whole {
+            self.glide = None;
+        }
+        self.redraw = true;
+    }
+
     /// After a tap is acted on (next frame): one on nothing may be the
     /// first of a double tap.
     pub(super) fn tapped(&mut self, at: (f64, f64), on_something: bool) {
         self.empty_tap = (!on_something).then(|| (at, now_ms()));
     }
+}
+
+/// The glide a drag lets go into at `up_ms`, if it was moving.
+fn glide_from(press: &Press, up_ms: f64) -> Option<Glide> {
+    if press.pinched || prefers_reduced_motion() {
+        return None;
+    }
+    // Over the last `GLIDE_SPEED_OVER_MS`, or from the move before if
+    // that has only one (as on a busy page).
+    let &(t1, b) = press.trail.last()?;
+    let recent = press
+        .trail
+        .iter()
+        .filter(|&&(t, _)| up_ms - t <= GLIDE_SPEED_OVER_MS)
+        .count();
+    let first = press.trail.len().saturating_sub(recent.max(2));
+    let &(t0, a) = press.trail.get(first)?;
+    if up_ms - t1 > GLIDE_REST_MS || t1 - t0 < 1.0 {
+        return None;
+    }
+    let velocity = (DVec2::new(b.0, b.1) - DVec2::new(a.0, a.1)) / (t1 - t0);
+    (velocity.length() >= GLIDE_MIN_SPEED).then(|| Glide {
+        velocity: velocity.clamp_length_max(GLIDE_MAX_SPEED),
+        at_ms: up_ms,
+    })
 }

@@ -6,11 +6,11 @@
 // over the baked basemap if there is one (`mise run tiles:basemap`), and
 // a note offering it back when WebGPU is asked for in the debug panel; and
 // without a 2D canvas either: the boats listed by route in the map's
-// place, a click on one bringing it up in the finder. On phones with a
-// map, touch too (touch.js). Exits non-zero if
+// place, a click on one bringing it up in the finder. With a map, its
+// momentum, and on phones touch too (touch.js). Exits non-zero if
 // anything's missing.
 const { open, find, wait } = require("./app");
-const { checkTouch, checkSheet } = require("./touch");
+const { checkTouch, checkSheet, checkGlide } = require("./touch");
 
 (async () => {
   let failed = 0;
@@ -66,6 +66,7 @@ const { checkTouch, checkSheet } = require("./touch");
       check(`${size}: a boat clicked comes up in the finder`, shown === name && !!open, shown);
     }
     if (phone && canvas2d) await checkTouch(page, check, size);
+    if (canvas2d) await checkGlide(page, check, size, phone);
     await find(page, "walla walla");
     const boats = await page.$$eval("#finder-list .hit .name", (n) => n.map((e) => e.textContent));
     check(`${size}: finds a boat`, boats.some((b) => /Walla Walla/.test(b)), boats.slice(0, 3).join(", "));
