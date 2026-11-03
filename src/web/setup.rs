@@ -132,6 +132,8 @@ pub(super) async fn run() -> Result<(), String> {
         style: STYLE_CARTOGRAPHIC,
         cursor: None,
         press: None,
+        touch: false,
+        empty_tap: None,
         legend: element("legend")?,
         settings: element("settings")?,
         settings_toggle: element("settings-toggle")?,

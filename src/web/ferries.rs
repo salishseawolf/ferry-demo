@@ -21,13 +21,13 @@ use super::{
     App, BOAT_NOTE_REACH, BOAT_NOTE_SHARE, DIM_ALPHA, LABEL_MAX_M_PER_PX, LEG_GLOW, NOTE_M,
     NOTE_MAX_M_PER_PX, NOTE_RAISE, ROUTE_DASH_PX, ROUTE_GLOW, ROUTE_HIGHLIGHT_ALPHA, ROUTE_WIDTH,
     SYMBOL_GLOW_ALPHA, TERMINAL_LABEL_MAX_M_PER_PX, TERMINAL_SAILINGS_SHOWN, VESSEL_HOVER_LINE_PX,
-    VESSEL_LINE_OF_BEAM, VESSEL_PICK_PX,
+    VESSEL_LINE_OF_BEAM,
 };
 
 /// Ferry hulls are drawn at their real length and beam, to scale with the
 /// terrain at every zoom. Outline widths (docked and laid-up boats, and
 /// the hovered one) are in CSS px, down to a share of the beam on small
-/// hulls. The cursor picks the nearest boat within `VESSEL_PICK_PX`, or
+/// hulls. The cursor picks the nearest boat within the pick radius (web/gestures.rs), or
 /// within a large hull.
 const VESSEL_LINE_PX: f64 = 1.5;
 /// Speed vectors and wakes, in standard line widths, and the wake's
@@ -140,12 +140,12 @@ impl App {
 
         // Whatever is nearest the cursor, boat or terminal.
         let dragging = self.press.as_ref().is_some_and(|p| p.dragging);
+        let pick = self.vessel_pick_px();
         let hovered = self.cursor.filter(|_| !dragging).and_then(|c| {
             // Distance to the cursor, less the symbol's reach beyond the
             // pick radius, so large symbols are picked anywhere on them.
-            let near = |s: (f64, f64), reach: f64| {
-                (s.0 - c.0).hypot(s.1 - c.1) - (reach - VESSEL_PICK_PX).max(0.0)
-            };
+            let near =
+                |s: (f64, f64), reach: f64| (s.0 - c.0).hypot(s.1 - c.1) - (reach - pick).max(0.0);
             let boats = shown
                 .iter()
                 .map(|&(i, _, s)| (Picked::Vessel(i), near(s, hull_px(&vessels[i]).0 / 2.0)));
@@ -156,8 +156,8 @@ impl App {
             let docks = slips.iter().filter_map(|&(i, p, _)| {
                 let (x, y) = self.screen_px(anchor_at(i, p))?;
                 let half = (
-                    (anchor_px * ANCHOR_HALF_WIDTH).max(VESSEL_PICK_PX),
-                    (anchor_px * ANCHOR_HALF_HEIGHT).max(VESSEL_PICK_PX),
+                    (anchor_px * ANCHOR_HALF_WIDTH).max(pick),
+                    (anchor_px * ANCHOR_HALF_HEIGHT).max(pick),
                 );
                 let center = (x, y + anchor_px * ANCHOR_DROP);
                 let q = (
@@ -166,11 +166,11 @@ impl App {
                 );
                 let outside = q.0.max(0.0).hypot(q.1.max(0.0));
                 let inside = q.0.max(q.1).min(0.0);
-                Some((Picked::Terminal(i), VESSEL_PICK_PX + outside + inside))
+                Some((Picked::Terminal(i), pick + outside + inside))
             });
             boats
                 .chain(docks)
-                .filter(|&(_, d)| d <= VESSEL_PICK_PX)
+                .filter(|&(_, d)| d <= pick)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(picked, _)| picked)
         });

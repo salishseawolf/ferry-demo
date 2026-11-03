@@ -9,6 +9,7 @@ mod dom;
 mod ferries;
 mod fetches;
 mod fit;
+mod gestures;
 mod hex;
 mod labels;
 mod map;
@@ -25,7 +26,7 @@ use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, WheelEvent};
+use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, WheelEvent};
 
 use crate::camera::MapCamera;
 use crate::finder::{self, Finder, Loaded, Scope, Sheet, Target};
@@ -54,6 +55,7 @@ use debug::Perf;
 use dom::{clock, date_clock, now_ms, page_hidden, request_frame, show_error};
 use fetches::Fetches;
 use fit::Flight;
+use gestures::Press;
 use hex::HexGrid;
 use labels::Labels;
 use map::Map;
@@ -63,8 +65,6 @@ use notes::{Notes, html_escape};
 use picking::RouteLine;
 use setup::run;
 
-/// A press that moves less than this (CSS px) is a click, not a drag.
-const CLICK_SLOP_PX: f64 = 4.0;
 /// Older sailings to a page.
 const OLDER_PAGE: u32 = 40;
 const LINE_WIDTH_CSS_PX: f64 = 2.0;
@@ -93,7 +93,6 @@ const TAB_RETURN_GRACE_MS: f64 = 300.0;
 /// An outline is at most this share of the hull's beam.
 const VESSEL_LINE_OF_BEAM: f64 = 0.3;
 const VESSEL_HOVER_LINE_PX: f64 = 2.5;
-const VESSEL_PICK_PX: f64 = 14.0;
 /// Names show when the map is at least this detailed (ground meters per
 /// CSS px), `LABEL_GAP_PX` from their symbol's box (placement.rs picks
 /// the side and slot).
@@ -147,12 +146,11 @@ const FIT_ITERATIONS: usize = 12;
 const ROUTE_ALPHA: f32 = 0.45;
 const ROUTE_WIDTH: f32 = 0.75;
 const ROUTE_DASH_PX: f32 = 7.0;
-/// Highlighting a route or a boat: the cursor picks a route's leg within
-/// `ROUTE_PICK_PX` of its line, and the whole route lights up. Highlighted routes glow (two soft passes
+/// Highlighting a route or a boat: the cursor picks a route's leg near
+/// its line (web/gestures.rs), and the whole route lights up. Highlighted routes glow (two soft passes
 /// of the hover color, in standard line widths) under darker dashes, and
 /// highlighted boats and terminals get a halo. Hovering a route dims what
 /// isn't on it to `DIM_ALPHA`.
-const ROUTE_PICK_PX: f64 = 6.0;
 const ROUTE_GLOW: [(f32, f32); 2] = [(5.0, 0.18), (2.5, 0.35)];
 /// On a route of several legs, the leg under the cursor glows brighter.
 const LEG_GLOW: (f32, f32) = (3.5, 0.3);
@@ -189,15 +187,6 @@ struct OlderView {
     pages: usize,
 }
 
-struct Press {
-    start: (f64, f64),
-    last: (f64, f64),
-    dragging: bool,
-    /// Surface point (unit vector) under the cursor at press time; dragging
-    /// keeps it under the cursor. None if the press started off the planet.
-    grabbed: Option<DVec3>,
-}
-
 struct App {
     canvas: HtmlCanvasElement,
     /// None when the browser can't draw the map, or stopped being able
@@ -228,6 +217,12 @@ struct App {
     /// Cursor in CSS pixels relative to the canvas, if over it.
     cursor: Option<(f64, f64)>,
     press: Option<Press>,
+    /// The pointer last used on the map is a finger, which gets more
+    /// room to tap and pick (web/gestures.rs).
+    touch: bool,
+    /// A tap on nothing not long ago (CSS px, ms): another soon there
+    /// zooms in.
+    empty_tap: Option<((f64, f64), f64)>,
     legend: Element,
     /// The map settings (#settings), with the key, and its button.
     settings: Element,
@@ -922,7 +917,10 @@ impl App {
         }
         self.update_measure_box();
         // A click: fly to what it was on, and bring that up in the finder.
-        if let Some((_, touch)) = self.pending_click.take() {
+        if let Some((at, touch)) = self.pending_click.take() {
+            if touch {
+                self.tapped(at, self.pointed.is_some());
+            }
             // The finder first, so the fit leaves room for its details.
             if let Some(target) = self.pointed {
                 self.find(target);
@@ -971,69 +969,6 @@ impl App {
         let _ = self
             .settings_toggle
             .set_attribute("aria-expanded", if open { "true" } else { "false" });
-    }
-
-    fn pointer_down(&mut self, e: &PointerEvent) {
-        self.redraw = true;
-        self.flight = None;
-        if e.button() != 0 {
-            return;
-        }
-        let _ = self.canvas.set_pointer_capture(e.pointer_id());
-        let pos = (e.offset_x() as f64, e.offset_y() as f64);
-        self.press = Some(Press {
-            start: pos,
-            last: pos,
-            dragging: false,
-            grabbed: self.surface_at(pos),
-        });
-    }
-
-    fn pointer_move(&mut self, e: &PointerEvent) {
-        self.redraw = true;
-        let pos = (e.offset_x() as f64, e.offset_y() as f64);
-        self.cursor = Some(pos);
-        let (x, y) = self.ndc(pos);
-        if let Some(press) = &mut self.press {
-            let moved = (pos.0 - press.start.0).hypot(pos.1 - press.start.1);
-            press.dragging |= moved > CLICK_SLOP_PX;
-            // Push the map by the grabbed point.
-            if press.dragging
-                && let Some(grabbed) = press.grabbed
-            {
-                self.camera.drag_to(grabbed, x, y);
-            }
-            press.last = pos;
-        }
-    }
-
-    fn pointer_up(&mut self, e: &PointerEvent) {
-        self.redraw = true;
-        if e.button() != 0 {
-            return;
-        }
-        let press = self.press.take();
-        // A click on the map first closes an open note.
-        if press.as_ref().is_some_and(|p| !p.dragging) && self.notes.close() {
-            return;
-        }
-        // Measuring, a click sets a point; otherwise a click on something
-        // flies there and brings it up in the finder (next frame).
-        if !self.measuring {
-            if let Some(press) = press.filter(|p| !p.dragging) {
-                self.pending_click = Some((press.start, e.pointer_type() == "touch"));
-            }
-            return;
-        }
-        if let Some(press) = press
-            && !press.dragging
-            && let Some(p) = self.hover()
-        {
-            if self.measure.is_finished() || self.measure.source.is_none() {
-                self.measure_end = None;
-            }
-            self.measure.click(p);
-        }
     }
 
     fn key_down(&mut self, e: &KeyboardEvent) {
