@@ -10,7 +10,7 @@
 // map, touch too (touch.js). Exits non-zero if
 // anything's missing.
 const { open, find, wait } = require("./app");
-const { checkTouch } = require("./touch");
+const { checkTouch, checkSheet } = require("./touch");
 
 (async () => {
   let failed = 0;
@@ -93,6 +93,7 @@ const { checkTouch } = require("./touch");
       await wait(300);
       check(`${size}: back to the details`, await page.$eval("#finder-page", (p) => p.hidden));
     }
+    if (phone) await checkSheet(page, check, size);
     check(`${size}: no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
     await browser.close();
   }

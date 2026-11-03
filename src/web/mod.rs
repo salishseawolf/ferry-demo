@@ -19,6 +19,7 @@ mod no_map;
 mod notes;
 mod picking;
 mod setup;
+mod sheet;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,7 +39,7 @@ use crate::legend;
 use crate::live::{Feed, Update, VESSELS_MS};
 use crate::measure::Measure;
 use crate::palette;
-use crate::renderer::Globals;
+use crate::renderer::{Globals, pixel_ratio};
 use crate::routes::{self, Leg, ServiceRoute};
 use crate::scene::{HOVER_CELL_COLOR, Scene, Segment};
 use crate::terminals::{Terminals, bulletins_from, sailings_from};
@@ -64,6 +65,7 @@ use no_map::NoMap;
 use notes::{Notes, html_escape};
 use picking::RouteLine;
 use setup::run;
+use sheet::SheetDrag;
 
 /// Older sailings to a page.
 const OLDER_PAGE: u32 = 40;
@@ -223,6 +225,11 @@ struct App {
     /// A tap on nothing not long ago (CSS px, ms): another soon there
     /// zooms in.
     empty_tap: Option<((f64, f64), f64)>,
+    /// A phone's details sheet being dragged by its handle, and whether
+    /// the last press on the handle dragged it, which makes no tap
+    /// (web/sheet.rs).
+    sheet_drag: Option<SheetDrag>,
+    sheet_dragged: bool,
     legend: Element,
     /// The map settings (#settings), with the key, and its button.
     settings: Element,
@@ -864,7 +871,7 @@ impl App {
             return;
         };
         self.camera.set_aspect(width as f64 / height as f64);
-        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let dpr = pixel_ratio();
 
         if let Some((at, _)) = self.pending_click {
             self.cursor = Some(at);

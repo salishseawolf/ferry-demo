@@ -482,6 +482,10 @@
           border: 0; background: transparent; cursor: pointer;
         }
         .handle::before { content: ""; width: 44px; height: 5px; border-radius: 3px; background: #b6c1c5; }
+        /* Dragged by the handle (web/sheet.rs), the sheet follows the
+           finger, held at its height there with no transition. */
+        .handle { touch-action: none; }
+        #finder #finder-drop.held { transition: none; }
         #finder-drop .fold { flex: 1; overflow-y: auto; }
         #finder-list { max-height: none; overflow: visible; padding: 0; border: 0; box-shadow: none; border-radius: 0; }
         #finder-page { max-height: none; overflow: visible; padding: 0 2px 8px; border: 0; box-shadow: none; border-radius: 0; }

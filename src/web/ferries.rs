@@ -7,6 +7,7 @@ use crate::geo::{EARTH_RADIUS_M, LonLat, distance_m};
 use crate::live::VESSELS_MS;
 use crate::palette;
 use crate::placement::{self, Badge, Rect, Side};
+use crate::renderer::pixel_ratio;
 use crate::scene::{Marker, MarkerKind, Scene};
 use crate::terminals::symbol_scale;
 use crate::view::LAYER_FERRIES;
@@ -70,7 +71,7 @@ impl App {
             return;
         }
         let now = js_sys::Date::now();
-        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let dpr = pixel_ratio();
         let (w, h) = (
             self.canvas.client_width() as f64,
             self.canvas.client_height() as f64,

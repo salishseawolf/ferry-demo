@@ -1398,6 +1398,47 @@ mod dom {
             self.sheet
         }
 
+        /// The sheet (#finder-drop), on a phone.
+        fn drop(&self) -> Option<Element> {
+            self.list.closest("#finder-drop").ok().flatten()
+        }
+
+        /// The sheet's height (CSS px) now.
+        pub fn sheet_height(&self) -> Option<f64> {
+            self.drop().map(|d| d.get_bounding_client_rect().height())
+        }
+
+        /// How tall (CSS px) the sheet is at each of its heights, as
+        /// index.html sets them: measured, with the sheet held still (see
+        /// `hold_sheet`).
+        pub fn sheet_heights(&mut self) -> Vec<(Sheet, f64)> {
+            let Some(drop) = self.drop() else {
+                return Vec::new();
+            };
+            let was = self.sheet;
+            let heights = [Sheet::Peek, Sheet::Half, Sheet::Full]
+                .into_iter()
+                .map(|s| {
+                    self.set_sheet(s);
+                    (s, drop.get_bounding_client_rect().height())
+                })
+                .collect();
+            self.set_sheet(was);
+            heights
+        }
+
+        /// Holds the sheet still while `held` (no transition, for
+        /// dragging and measuring it), at `height` (CSS px) if given; its
+        /// class's height otherwise.
+        pub fn hold_sheet(&self, held: bool, height: Option<f64>) {
+            let Some(drop) = self.drop() else { return };
+            let _ = drop.class_list().toggle_with_force("held", held);
+            let _ = match height {
+                Some(h) => drop.set_attribute("style", &format!("height: {h:.1}px")),
+                None => drop.remove_attribute("style"),
+            };
+        }
+
         /// Whether there are matches showing (`.matched` on #finder).
         pub fn matched(&self) -> bool {
             !self.entries.is_empty()

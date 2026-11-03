@@ -8,7 +8,8 @@ const puppeteer = require("puppeteer-core");
 
 const URL = process.env.APP_URL || "http://127.0.0.1:8080/";
 const DESK = { width: 1400, height: 900 };
-const PHONE = { width: 390, height: 844, isMobile: true, hasTouch: true };
+// A phone's screen: three physical pixels to a CSS pixel, as many have.
+const PHONE = { width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
 
 function chromium() {
   if (process.env.CHROMIUM) return process.env.CHROMIUM;

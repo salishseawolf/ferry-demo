@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent};
+use web_sys::{Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent, PointerEvent};
 
 use crate::basemap::Grid;
 use crate::camera::{MapCamera, parse_view_fragment};
@@ -134,6 +134,8 @@ pub(super) async fn run() -> Result<(), String> {
         press: None,
         touch: false,
         empty_tap: None,
+        sheet_drag: None,
+        sheet_dragged: false,
         legend: element("legend")?,
         settings: element("settings")?,
         settings_toggle: element("settings-toggle")?,
@@ -392,9 +394,25 @@ pub(super) async fn run() -> Result<(), String> {
             app.set_settings_open(false);
         }
     });
+    // The sheet's handle: dragged, it moves the sheet (web/sheet.rs);
+    // tapped, it steps through the sheet's heights.
     let handle = element("finder-handle")?;
+    listen(&handle, "pointerdown", &app, |app, e: PointerEvent| {
+        app.sheet_down(&e)
+    });
+    listen(&handle, "pointermove", &app, |app, e: PointerEvent| {
+        app.sheet_move(&e)
+    });
+    listen(&handle, "pointerup", &app, |app, e: PointerEvent| {
+        app.sheet_up(&e, false)
+    });
+    listen(&handle, "pointercancel", &app, |app, e: PointerEvent| {
+        app.sheet_up(&e, true)
+    });
     listen(&handle, "click", &app, |app, _: web_sys::Event| {
-        app.finder.cycle_sheet()
+        if !std::mem::take(&mut app.sheet_dragged) {
+            app.finder.cycle_sheet();
+        }
     });
     // The pointer resting on a match opens it after a moment; a click on
     // its name opens it at once.

@@ -5,7 +5,7 @@ use web_sys::Element;
 use crate::camera::view_fragment;
 use crate::geo::group_thousands;
 use crate::perf::{FrameStats, format_bytes};
-use crate::renderer::TERRAIN_SLOTS;
+use crate::renderer::{TERRAIN_SLOTS, pixel_ratio};
 
 use super::map::Map;
 use crate::terminals::symbol_scale;
@@ -96,10 +96,16 @@ impl App {
             .unwrap_or_default();
         row("Link", format!("{page}#{fragment}"));
         let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let drawn = pixel_ratio();
+        let drawn = if drawn < dpr {
+            format!(" (drawn at {drawn})")
+        } else {
+            String::new()
+        };
         row(
             "Window",
             format!(
-                "{} × {} CSS px, DPR {dpr}",
+                "{} × {} CSS px, DPR {dpr}{drawn}",
                 self.canvas.client_width(),
                 self.canvas.client_height()
             ),

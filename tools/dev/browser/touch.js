@@ -142,6 +142,23 @@ async function checkTouch(page, check, size) {
   const want = 200 * scale.mPerPx;
   check(`${size}: measuring by tap`, Math.abs(got - want) / want < 0.03, `${shown}, ${Math.round(want)} m between the taps`);
   await page.evaluate(() => document.getElementById("measure-tool").click());
+
+  // Drawn at two physical pixels to a CSS pixel, though the screen has
+  // three; and, flat, no more basemap images than the screen needs.
+  const drawn = await page.evaluate(() => {
+    const c = document.getElementById("world");
+    return c.width / c.clientWidth;
+  });
+  check(`${size}: drawn at 2× on a 3× screen`, Math.abs(drawn - 2) < 0.01, `${drawn.toFixed(2)}×`);
+  const images = await page.evaluate(() => {
+    for (const dt of document.querySelectorAll("#perf-body dt"))
+      if (dt.textContent === "Basemap images") return dt.nextElementSibling.textContent;
+    return null;
+  });
+  if (images !== null) {
+    const mb = parseFloat(images.replace(/[^\d.]/g, "")) * (/ MB/.test(images) ? 1 : 1 / 1024);
+    check(`${size}: basemap images within a phone's means`, mb <= 64, images);
+  }
   await page.evaluate(() => document.getElementById("debug").click());
   await wait(300);
 
@@ -165,4 +182,61 @@ async function checkTouch(page, check, size) {
   await cdp.detach();
 }
 
-module.exports = { checkTouch };
+// The details sheet (web/sheet.rs), with matches showing: dragged by its
+// handle it follows the finger and settles at the nearest height, a flick
+// carries it on, and a tap still steps it on.
+async function checkSheet(page, check, size) {
+  const cdp = await page.createCDPSession();
+  const touch = (type, points) =>
+    cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map(([x, y]) => ({ x, y, id: 0 })) });
+  const sheet = () =>
+    page.evaluate(() => {
+      const f = document.getElementById("finder");
+      const height = document.getElementById("finder-drop").getBoundingClientRect().height;
+      return { at: ["peek", "half", "full"].find((s) => f.classList.contains(`sheet-${s}`)), height };
+    });
+  const handle = async () => {
+    const r = await page.$eval("#finder-handle", (h) => h.getBoundingClientRect().toJSON());
+    return [r.x + r.width / 2, r.y + r.height / 2];
+  };
+  // From the handle by `dy` (up negative) in `steps` moves `ms` apart.
+  const drag = async (dy, steps, ms) => {
+    const [x, y] = await handle();
+    await touch("touchStart", [[x, y]]);
+    for (let i = 1; i <= steps; i++) {
+      await touch("touchMove", [[x, y + (dy * i) / steps]]);
+      await wait(ms);
+    }
+    const midway = await sheet();
+    await touch("touchEnd", []);
+    await wait(600);
+    return midway;
+  };
+  const matched = await page.evaluate(() => document.getElementById("finder").classList.contains("matched"));
+  check(`${size}: matches in the sheet`, matched);
+  if (!matched) return cdp.detach();
+  await drag(1000, 20, 16);
+  const start = await sheet();
+  check(`${size}: dragged down, the sheet peeks`, start.at === "peek");
+  // Slowly, so it settles by where it is: 200 px up from the peek is
+  // nearer half than the peek, and 300 more nearer full.
+  const midway = await drag(-200, 10, 40);
+  const grown = midway.height - start.height;
+  check(`${size}: the sheet follows the finger`, Math.abs(grown - 200) < 2, `${grown.toFixed(0)} px for 200`);
+  check(`${size}: and settles at the nearest height`, (await sheet()).at === "half");
+  await drag(-300, 10, 40);
+  check(`${size}: and on up to full`, (await sheet()).at === "full");
+  // A short quick flick up from the peek: nearer the peek by distance,
+  // but its speed carries it on to half.
+  await drag(1000, 20, 16);
+  await drag(-80, 4, 20);
+  check(`${size}: a flick carries it on`, (await sheet()).at === "half");
+  const [x, y] = await handle();
+  await touch("touchStart", [[x, y]]);
+  await touch("touchEnd", []);
+  await wait(600);
+  check(`${size}: a tap on the handle steps it on`, (await sheet()).at === "full");
+  await cdp.detach();
+}
+
+module.exports = { checkTouch, checkSheet };
