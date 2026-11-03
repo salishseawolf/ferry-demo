@@ -1,7 +1,7 @@
 # The terrain tiles, published as their own image by `mise run tiles:publish`
 # (from the machine with the source rasters), which updates this pin.
 # Builds can use a local one instead: --build-arg TILES=<image>.
-ARG TILES=ghcr.io/salishseawolf/ferry-demo-tiles@sha256:978affb3477c4051b287d59752824ae505b7681e3f1f33b375e8b0ac48e21f74
+ARG TILES=ghcr.io/salishseawolf/ferry-demo-tiles@sha256:f2d31d2ef7fae0a83db47cc3148eebfd0438f2d3a3a501f494a365bbdc09f6b9
 
 # The toolchain, with the same tool versions as mise.toml: shared by the
 # release build below and by the dev server (the `dev` stage, compose.yaml).
