@@ -177,6 +177,16 @@ impl MapCamera {
         self.drag_to(held, ndc_x, ndc_y);
     }
 
+    /// A pinch: the view at `altitude_m` (within the limits), with the
+    /// surface point `grabbed` (a unit vector) under normalized device
+    /// coordinates (x, y), the fingers' midpoint. Set from where the pinch
+    /// started each time, so it can't drift.
+    pub fn pinch(&mut self, grabbed: DVec3, altitude_m: f64, ndc_x: f64, ndc_y: f64) {
+        self.altitude = altitude_m;
+        self.zoom(0.0);
+        self.drag_to(grabbed, ndc_x, ndc_y);
+    }
+
     /// Shows exactly the square of the map `half_m` (m) either side of
     /// `center`, whatever the limits, in a square window: for baking the
     /// basemap.
@@ -354,6 +364,21 @@ mod tests {
         cam.zoom_at(-0.5, 0.6, -0.4);
         assert!(cam.altitude < 30_000.0);
         assert!(close(cam.surface_at(0.6, -0.4).unwrap(), held));
+    }
+
+    #[test]
+    fn a_pinch_keeps_the_grabbed_point_between_the_fingers() {
+        let mut cam = camera(AREA.center, 30_000.0);
+        let grabbed = cam.surface_at(0.2, -0.1).unwrap();
+        // Spread twice as far apart while moving: half the altitude, and
+        // the point follows the midpoint.
+        cam.pinch(grabbed, 15_000.0, -0.3, 0.25);
+        assert_eq!(cam.altitude, 15_000.0);
+        assert!(close(cam.surface_at(-0.3, 0.25).unwrap(), grabbed));
+        // Past the zoom limit: held there, and the point still follows.
+        cam.pinch(grabbed, 1.0, 0.1, 0.1);
+        assert!((cam.altitude - MIN_ALTITUDE_RADII * EARTH_RADIUS_M).abs() < 1e-6);
+        assert!(close(cam.surface_at(0.1, 0.1).unwrap(), grabbed));
     }
 
     #[test]

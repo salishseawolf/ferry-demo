@@ -22,8 +22,12 @@ use crate::terrain::{Manifest, TileKey};
 
 /// What shows where there's no basemap: the GPU's clear color.
 const BACKGROUND: &str = "#0d1016";
-/// Basemap images kept loaded, and fetched at once.
+/// Basemap images kept loaded: twice what covers the screen, and the
+/// coarse levels' (at most 21), within these bounds. Decoded, each is
+/// 1 MiB, which a phone's browser counts against the tab.
+const MIN_IMAGES: usize = 32;
 const MAX_IMAGES: usize = 160;
+/// Basemap images fetched at once.
 const MAX_LOADING: usize = 8;
 /// Coarse levels always fetched for the view, so something shows at once.
 const ALWAYS_LEVEL: u8 = 2;
@@ -65,6 +69,8 @@ pub struct FlatRenderer {
     /// Line overlays in the order of `OVERLAYS`.
     overlays: Vec<Vec<Segment>>,
     frame: u64,
+    /// How many images to keep, for the screen's size (see `MAX_IMAGES`).
+    keep: usize,
     pub counts: FrameCounts,
 }
 
@@ -86,6 +92,7 @@ impl FlatRenderer {
             arrived: Rc::default(),
             overlays: vec![Vec::new(); OVERLAYS.len()],
             frame: 0,
+            keep: MAX_IMAGES,
             counts: FrameCounts::default(),
         })
     }
@@ -184,7 +191,10 @@ impl FlatRenderer {
             }
         }
         let mut drawn = 0;
-        for key in self.grid.covering(z, min, max).collect::<Vec<_>>() {
+        let shown: Vec<TileKey> = self.grid.covering(z, min, max).collect();
+        let coarse: usize = (0..=ALWAYS_LEVEL.min(z)).map(|z| 1 << (2 * z)).sum();
+        self.keep = (2 * shown.len() + coarse).clamp(MIN_IMAGES, MAX_IMAGES);
+        for key in shown {
             self.want(key);
             // The tile itself, or the nearest ancestor that's in.
             let mut source = Some(key);
@@ -270,9 +280,9 @@ impl FlatRenderer {
         );
     }
 
-    /// Lets go of the images used longest ago, beyond `MAX_IMAGES`.
+    /// Lets go of the images used longest ago, beyond `keep`.
     fn evict(&mut self) {
-        if self.images.len() <= MAX_IMAGES {
+        if self.images.len() <= self.keep {
             return;
         }
         let mut by_age: Vec<(u64, TileKey)> = (self.images.iter())
@@ -280,7 +290,7 @@ impl FlatRenderer {
             .map(|(k, i)| (i.used, *k))
             .collect();
         by_age.sort();
-        let excess = self.images.len() - MAX_IMAGES;
+        let excess = self.images.len() - self.keep;
         for (_, key) in by_age.into_iter().take(excess) {
             self.images.remove(&key);
         }

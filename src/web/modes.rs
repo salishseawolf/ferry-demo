@@ -127,7 +127,7 @@ pub(super) fn fresh_canvas(canvas: &HtmlCanvasElement) -> Result<HtmlCanvasEleme
     Ok(fresh)
 }
 
-/// The map's handlers on `canvas`: dragging, clicking, the wheel.
+/// The map's handlers on `canvas`: dragging, pinching, clicking, the wheel.
 pub(super) fn listen_canvas(canvas: &HtmlCanvasElement, app: &Rc<RefCell<App>>) {
     listen(canvas, "pointerdown", app, |app, e: PointerEvent| {
         app.pointer_down(&e)
@@ -137,6 +137,9 @@ pub(super) fn listen_canvas(canvas: &HtmlCanvasElement, app: &Rc<RefCell<App>>) 
     });
     listen(canvas, "pointerup", app, |app, e: PointerEvent| {
         app.pointer_up(&e)
+    });
+    listen(canvas, "pointercancel", app, |app, e: PointerEvent| {
+        app.pointer_cancel(&e)
     });
     listen(canvas, "pointerleave", app, |app, _: PointerEvent| {
         app.cursor = None;

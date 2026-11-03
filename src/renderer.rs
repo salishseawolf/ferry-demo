@@ -1030,9 +1030,22 @@ fn create_normals_pass(
     )
 }
 
-/// Canvas size in physical pixels, never zero.
+/// The map is drawn at most this many physical pixels to a CSS pixel:
+/// a phone's 3 would draw over twice the pixels of 2 for little to see.
+const MAX_PIXEL_RATIO: f64 = 2.0;
+
+/// Physical pixels the map is drawn with to a CSS pixel: the screen's,
+/// up to `MAX_PIXEL_RATIO`.
+pub(crate) fn pixel_ratio() -> f64 {
+    web_sys::window()
+        .map_or(1.0, |w| w.device_pixel_ratio())
+        .min(MAX_PIXEL_RATIO)
+}
+
+/// Canvas size in physical pixels (as drawn: see `pixel_ratio`), never
+/// zero.
 pub(crate) fn displayed_size(canvas: &HtmlCanvasElement) -> (u32, u32) {
-    let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+    let dpr = pixel_ratio();
     let width = ((canvas.client_width() as f64 * dpr) as u32).max(1);
     let height = ((canvas.client_height() as f64 * dpr) as u32).max(1);
     (width, height)

@@ -8,16 +8,17 @@ use crate::geo::LonLat;
 use crate::routes::legs_between;
 use glam::DVec3;
 
-use super::{ANCHOR_CLEAR_M, ANCHOR_INLAND, ANCHOR_M, App, ROUTE_PICK_PX};
+use super::{ANCHOR_CLEAR_M, ANCHOR_INLAND, ANCHOR_M, App};
 
 /// A lone boat or terminal is fitted as if it reached this far (m).
 const FIT_MIN_REACH_M: f64 = 1500.0;
 
 impl App {
-    /// The route whose line passes within `ROUTE_PICK_PX` of `cursor`
+    /// The route whose line passes within the pick radius of `cursor`
     /// (CSS px), the nearest if several. Slip approaches aren't picked.
     pub(super) fn route_at(&self, cursor: (f64, f64)) -> Option<usize> {
         let (cx, cy) = cursor;
+        let pick = self.route_pick_px();
         let to_segment = |a: (f64, f64), b: (f64, f64)| {
             let (dx, dy) = (b.0 - a.0, b.1 - a.1);
             let t = (((cx - a.0) * dx + (cy - a.1) * dy) / (dx * dx + dy * dy).max(1e-9))
@@ -39,7 +40,7 @@ impl App {
                     .windows(2)
                     .filter_map(|w| Some(to_segment(w[0]?, w[1]?)))
                     .fold(f64::INFINITY, f64::min);
-                (d <= ROUTE_PICK_PX).then_some((r, d))
+                (d <= pick).then_some((r, d))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(r, _)| r)

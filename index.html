@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>ferry-demo</title>
+    <!-- Visit counts (Umami, self-hosted), only on the production domains. -->
+    <script defer src="https://umami.salishseawolf.com/info.js" data-website-id="adedb9e9-595f-4c97-8c08-19fe2b4383a5" data-domains="ferries.salishseawolf.com,www.ferries.salishseawolf.com"></script>
     <link data-trunk rel="rust" data-wasm-opt="s" />
     <!-- Faces served with the app, each with its OFL license beside it:
          Source Serif 4 for ferry names (OFL.txt), Overpass and Overpass
@@ -146,7 +148,7 @@
       #finder .field:focus-within { border-color: var(--mark); box-shadow: 3px 3px 0 rgba(176, 20, 106, 0.3); }
       #finder-input {
         flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent;
-        font: 600 15px/1 var(--sans); color: var(--ink);
+        font: 600 16px/1 var(--sans); color: var(--ink);
       }
       #finder-input::placeholder { color: var(--muted); font-weight: 400; }
       #finder-input::-webkit-search-cancel-button { cursor: pointer; }
@@ -482,6 +484,10 @@
           border: 0; background: transparent; cursor: pointer;
         }
         .handle::before { content: ""; width: 44px; height: 5px; border-radius: 3px; background: #b6c1c5; }
+        /* Dragged by the handle (web/sheet.rs), the sheet follows the
+           finger, held at its height there with no transition. */
+        .handle { touch-action: none; }
+        #finder #finder-drop.held { transition: none; }
         #finder-drop .fold { flex: 1; overflow-y: auto; }
         #finder-list { max-height: none; overflow: visible; padding: 0; border: 0; box-shadow: none; border-radius: 0; }
         #finder-page { max-height: none; overflow: visible; padding: 0 2px 8px; border: 0; box-shadow: none; border-radius: 0; }
@@ -552,7 +558,7 @@
       <label class="switch">Debug panel <input type="checkbox" id="debug" /></label>
       <h2>Key</h2>
       <div id="legend"></div>
-      <p class="help">Drag to move, scroll or pinch to zoom. Click a boat or route to zoom to it.</p>
+      <p class="help">Drag to move; scroll, pinch or double-tap to zoom. Click or tap a boat or route to zoom to it.</p>
     </div>
     <div id="dock">
       <div id="measure" class="paper" hidden>
