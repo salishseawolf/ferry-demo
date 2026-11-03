@@ -188,6 +188,12 @@ podman run --rm \
   python3 /tools/elevation.py
 """
 
+[tasks."tiles:basemap"]
+description = "Bake the basemap for browsers without a GPU into tiles/basemap/, with the app's renderer (needs `mise run dev` or `dev:offline` running; FORCE=1 to bake again)"
+# Like dev:shot, only this needs Node.
+tools = { node = "24" }
+run = "[ -d tools/dev/browser/node_modules ] || npm ci --prefix tools/dev/browser --no-audit --no-fund --silent; node tools/dev/browser/bake.js"
+
 [tasks."tiles:image"]
 description = "Build the terrain tiles image from tiles/, locally (TILES_IMAGE=localhost/ferry-demo-tiles:dev mise run container:build uses it)"
 run = "podman build -f tiles.Containerfile -t localhost/ferry-demo-tiles:dev tiles"

@@ -27,8 +27,10 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 // The app at `fragment` (e.g. "#at=47.6,-122.4,20000"), once it has had
 // time to fetch and draw. Errors from the page are collected in `errors`,
 // but for missing files (tiles not built, say). `webgpu: false` opens it
-// as a browser without WebGPU would see it (no navigator.gpu).
-async function open({ phone = false, fragment = "", settle = 7000, webgpu = true } = {}) {
+// as a browser without WebGPU would see it (no navigator.gpu), and with
+// `canvas2d: false` one without a 2D canvas either; `viewport` sets the
+// page's size outright.
+async function open({ phone = false, fragment = "", settle = 7000, webgpu = true, canvas2d = true, viewport } = {}) {
   const browser = await puppeteer.launch({
     executablePath: chromium(),
     headless: "new",
@@ -47,7 +49,15 @@ async function open({ phone = false, fragment = "", settle = 7000, webgpu = true
   });
   page.on("pageerror", (e) => errors.push(e.message));
   if (!webgpu) await page.evaluateOnNewDocument(() => delete Navigator.prototype.gpu);
-  await page.setViewport(phone ? PHONE : DESK);
+  if (!canvas2d) {
+    await page.evaluateOnNewDocument(() => {
+      const get = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (kind, ...rest) {
+        return kind === "2d" ? null : get.call(this, kind, ...rest);
+      };
+    });
+  }
+  await page.setViewport(viewport || (phone ? PHONE : DESK));
   await page.goto(URL + fragment, { waitUntil: "load" });
   await wait(settle);
   return { browser, page, errors };

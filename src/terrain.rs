@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 
 use glam::{DMat4, DVec2, DVec3, DVec4};
 
-use crate::camera::{OrbitCamera, ray_sphere};
+use crate::camera::{MapCamera, Projection};
 use crate::geo::{Cap, LonLat};
 
 pub const TILE_PX: u32 = 256;
@@ -38,6 +38,18 @@ pub struct TileKey {
 
 impl TileKey {
     pub const ROOT: TileKey = TileKey { z: 0, x: 0, y: 0 };
+
+    /// The zoom-`z` tile holding `p`.
+    pub fn at(p: LonLat, z: u8) -> TileKey {
+        let n = f64::from(1u32 << z);
+        let lat = p.lat.to_radians();
+        let index = |v: f64| (v * n).floor().clamp(0.0, n - 1.0) as u32;
+        TileKey {
+            z,
+            x: index((p.lon + 180.0) / 360.0),
+            y: index((1.0 - lat.tan().asinh() / PI) / 2.0),
+        }
+    }
 
     pub fn parent(self) -> Option<TileKey> {
         (self.z > 0).then(|| TileKey {
@@ -177,68 +189,62 @@ pub trait View {
 /// for tiles too big for their own samples to land on screen.
 const SCREEN_PROBES: usize = 5;
 
-/// The globe seen from the orbit camera.
-pub struct GlobeView {
-    eye: DVec3,
+/// The map seen through the camera.
+pub struct MapView {
+    projection: Projection,
     view_proj: DMat4,
     radius: f64,
-    /// Viewport height over twice the tangent of half the vertical field
-    /// of view: pixels per unit of size over distance.
-    focal_px: f64,
+    /// Pixels per meter on the map (the same everywhere on it).
+    px_per_m: f64,
     /// Surface points under a grid of screen positions.
     probes: Vec<LonLat>,
 }
 
-impl GlobeView {
-    pub fn new(camera: &OrbitCamera, height_px: f64) -> Self {
+impl MapView {
+    pub fn new(camera: &MapCamera, height_px: f64) -> Self {
         let steps = SCREEN_PROBES - 1;
         let probes = (0..SCREEN_PROBES * SCREEN_PROBES)
             .filter_map(|i| {
                 let ndc = |k: usize| 2.0 * k as f64 / steps as f64 - 1.0;
-                let ray = camera.ray(ndc(i % SCREEN_PROBES), ndc(i / SCREEN_PROBES));
-                ray_sphere(&ray, camera.radius).map(LonLat::from_vec)
+                camera
+                    .surface_at(ndc(i % SCREEN_PROBES), ndc(i / SCREEN_PROBES))
+                    .map(LonLat::from_vec)
             })
             .collect();
         Self {
-            eye: camera.eye(),
+            projection: camera.projection,
             view_proj: camera.view_proj(),
             radius: camera.radius,
-            focal_px: height_px / (2.0 * (camera.fov_y / 2.0).tan()),
+            px_per_m: 1.0 / camera.m_per_px(height_px),
             probes,
         }
     }
 }
 
-impl View for GlobeView {
+impl View for MapView {
     fn visible(&self, key: TileKey) -> bool {
         if key.z < ALWAYS_VISIBLE_BELOW_Z || self.probes.iter().any(|&p| key.contains(p)) {
             return true;
         }
-        let points: Vec<DVec3> = key.samples().map(|u| u * self.radius).collect();
-        // On the near side of the planet: in front of the horizon plane.
-        let horizon = self.radius * self.radius;
-        if !points.iter().any(|p| p.dot(self.eye) > horizon) {
+        let units: Vec<DVec3> = key.samples().collect();
+        // On the half of the planet the map shows.
+        if !units.iter().any(|&u| self.projection.shows(u)) {
             return false;
         }
         // Not wholly beyond any one side of the view.
-        let clip: Vec<DVec4> = points
+        let clip: Vec<DVec4> = units
             .iter()
-            .map(|p| self.view_proj * p.extend(1.0))
+            .map(|&u| self.view_proj * (u * self.radius).extend(1.0))
             .collect();
         let outside = |f: &dyn Fn(&DVec4) -> bool| clip.iter().all(f);
-        !(outside(&|c| c.x < -c.w)
-            || outside(&|c| c.x > c.w)
-            || outside(&|c| c.y < -c.w)
-            || outside(&|c| c.y > c.w)
-            || outside(&|c| c.w <= 0.0))
+        !(outside(&|c| c.x < -1.0)
+            || outside(&|c| c.x > 1.0)
+            || outside(&|c| c.y < -1.0)
+            || outside(&|c| c.y > 1.0))
     }
 
     fn pixels(&self, key: TileKey) -> f64 {
-        let nearest = key
-            .samples()
-            .map(|u| (u * self.radius).distance(self.eye))
-            .fold(f64::INFINITY, f64::min);
-        key.width_m(self.radius) / nearest.max(1.0) * self.focal_px
+        key.width_m(self.radius) * self.px_per_m
     }
 }
 
@@ -359,23 +365,13 @@ mod tests {
         radius_m: 300_000.0,
     };
 
-    fn key_at(p: LonLat, z: u8) -> TileKey {
-        let n = f64::from(1u32 << z);
-        let lat = p.lat.to_radians();
-        TileKey {
-            z,
-            x: ((p.lon + 180.0) / 360.0 * n) as u32,
-            y: ((1.0 - lat.tan().asinh() / PI) / 2.0 * n) as u32,
-        }
-    }
-
     /// Every tile down to `max_z` over a box around Seattle, and the
     /// ancestors of those.
     fn manifest(max_z: u8) -> Manifest {
         let mut tiles = HashSet::new();
         for z in 0..=max_z {
-            let a = key_at(LonLat::new(-125.0, 50.0), z);
-            let b = key_at(LonLat::new(-120.0, 45.0), z);
+            let a = TileKey::at(LonLat::new(-125.0, 50.0), z);
+            let b = TileKey::at(LonLat::new(-120.0, 45.0), z);
             for x in a.x..=b.x {
                 for y in a.y..=b.y {
                     tiles.insert(TileKey { z, x, y });
@@ -385,16 +381,22 @@ mod tests {
         Manifest::new(tiles, AREA)
     }
 
-    fn globe(altitude_radii: f64) -> GlobeView {
-        let cam = OrbitCamera::over(EARTH_RADIUS_M, SEATTLE, altitude_radii, 1.5);
-        GlobeView::new(&cam, 1000.0)
+    /// The map over Seattle, of an area as big as the planet's near half.
+    fn map(altitude_radii: f64) -> MapView {
+        let half = Cap {
+            center: SEATTLE,
+            radius_m: PI / 2.0 * EARTH_RADIUS_M,
+        };
+        let altitude = altitude_radii * EARTH_RADIUS_M;
+        let cam = MapCamera::new(EARTH_RADIUS_M, half, SEATTLE, altitude, 1.5);
+        MapView::new(&cam, 1000.0)
     }
 
     #[test]
     fn keys_match_the_xyz_scheme() {
         // The tile over Seattle at zoom 10, as any slippy map numbers it.
         assert_eq!(
-            key_at(SEATTLE, 10),
+            TileKey::at(SEATTLE, 10),
             TileKey {
                 z: 10,
                 x: 164,
@@ -427,14 +429,14 @@ mod tests {
     #[test]
     fn closer_views_select_finer_tiles() {
         let m = manifest(9);
-        let finest = |view: &GlobeView| select(&m, view).iter().map(|k| k.z).max().unwrap();
-        let far = finest(&globe(2.0));
-        let near = finest(&globe(0.01));
+        let finest = |view: &MapView| select(&m, view).iter().map(|k| k.z).max().unwrap();
+        let far = finest(&map(2.0));
+        let near = finest(&map(0.01));
         assert!(far < near && near == 9, "{far} {near}");
-        let coarsest = select(&m, &globe(9.0)).iter().map(|k| k.z).min().unwrap();
+        let coarsest = select(&m, &map(9.0)).iter().map(|k| k.z).min().unwrap();
         assert_eq!(coarsest, MIN_REGION_Z, "never coarser, even far out");
         // Tiles cover the view without overlap: none is another's ancestor.
-        let regions = select(&m, &globe(0.01));
+        let regions = select(&m, &map(0.01));
         for a in &regions {
             let mut p = a.parent();
             while let Some(k) = p {
@@ -448,8 +450,13 @@ mod tests {
     #[test]
     fn far_side_is_culled() {
         let m = manifest(6);
-        let cam = OrbitCamera::over(EARTH_RADIUS_M, LonLat::new(57.0, -47.0), 0.5, 1.5);
-        let view = GlobeView::new(&cam, 1000.0);
+        let far = LonLat::new(57.0, -47.0);
+        let area = Cap {
+            center: far,
+            radius_m: 1_000_000.0,
+        };
+        let cam = MapCamera::new(EARTH_RADIUS_M, area, far, 0.5 * EARTH_RADIUS_M, 1.5);
+        let view = MapView::new(&cam, 1000.0);
         assert!(
             select(&m, &view)
                 .iter()
@@ -466,11 +473,11 @@ mod tests {
             radius_m: PI * EARTH_RADIUS_M,
         };
         let m = Manifest::new([TileKey::ROOT, TileKey { z: 1, x: 0, y: 0 }], everywhere);
-        let regions = select(&m, &globe(0.5));
+        let regions = select(&m, &map(0.5));
         assert_eq!(regions.len(), 4);
         // Over a small area, the quarters outside it are left out.
         let m = Manifest::new([TileKey::ROOT, TileKey { z: 1, x: 0, y: 0 }], AREA);
-        assert_eq!(select(&m, &globe(0.5)), [TileKey { z: 1, x: 0, y: 0 }]);
+        assert_eq!(select(&m, &map(0.5)), [TileKey { z: 1, x: 0, y: 0 }]);
         let mut cache = Cache::new(4);
         cache.insert(TileKey::ROOT, 0);
         let s = cache.source(TileKey { z: 1, x: 1, y: 1 }, 1).unwrap();

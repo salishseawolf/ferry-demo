@@ -6,6 +6,8 @@ use crate::camera::view_fragment;
 use crate::geo::group_thousands;
 use crate::perf::{FrameStats, format_bytes};
 use crate::renderer::TERRAIN_SLOTS;
+
+use super::map::Map;
 use crate::terminals::symbol_scale;
 use crate::view::LAYER_CELLS;
 
@@ -180,28 +182,32 @@ impl App {
                 self.canvas.height()
             ),
         );
+        // The elevation tiles stream only for the GPU's map.
         let t = &self.terrain;
-        row(
-            "Terrain",
-            format!(
-                "{} regions ({} on stand-ins) · {}/{TERRAIN_SLOTS} tiles cached · {} loading · {} \
+        if matches!(self.renderer, Some(Map::Gpu(_))) {
+            row(
+                "Terrain",
+                format!(
+                    "{} regions ({} on stand-ins) · {}/{TERRAIN_SLOTS} tiles cached · {} loading · {} \
                  available",
-                t.drawn,
-                t.stand_ins,
-                t.cached(),
-                t.loading(),
-                group_thousands(t.available() as u64)
-            ),
-        );
+                    t.drawn,
+                    t.stand_ins,
+                    t.cached(),
+                    t.loading(),
+                    group_thousands(t.available() as u64)
+                ),
+            );
+        }
         if let Some(renderer) = &self.renderer {
-            let c = renderer.counts;
+            let c = renderer.counts();
             row("Draw calls", c.draw_calls.to_string());
             row("Triangles", group_thousands(c.triangles));
             row("Line segments", group_thousands(c.line_segments));
-            row(
-                "GPU memory",
-                format!("≈ {}", format_bytes(renderer.gpu_bytes())),
-            );
+            let memory = match renderer {
+                Map::Gpu(_) => "GPU memory",
+                Map::Flat(_) => "Basemap images",
+            };
+            row(memory, format!("≈ {}", format_bytes(renderer.bytes())));
         }
         rows
     }

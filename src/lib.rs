@@ -2,8 +2,11 @@
 // renderer and browser glue target wasm.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+mod basemap;
 mod camera;
 mod finder;
+#[cfg(target_arch = "wasm32")]
+mod flat;
 mod fleet;
 mod geo;
 mod grid;

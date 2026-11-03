@@ -22,16 +22,17 @@ impl App {
     /// Where the view looks and how far in.
     pub(super) fn pose(&self) -> Pose {
         Pose {
-            focus: self.camera.eye_dir(),
+            focus: self.camera.focus,
             scale: self.camera.altitude,
         }
     }
 
     /// Looks at `pose`, within the zoom limits.
     pub(super) fn set_pose(&mut self, pose: Pose) {
-        self.camera.set_eye_dir(pose.focus);
+        // The zoom first: how near the edge the view can go depends on it.
         self.camera.altitude = pose.scale;
         self.camera.zoom(0.0);
+        self.camera.set_focus(pose.focus);
     }
 
     /// The part of the canvas the panels leave clear (CSS px): below the
@@ -178,21 +179,17 @@ impl App {
     }
 
     /// Where unit vector `p` is drawn, in CSS px from the canvas's top
-    /// left, if it's on the visible side of the planet.
+    /// left, if it's on the half of the planet the map shows.
     pub(super) fn screen_px(&self, p: DVec3) -> Option<(f64, f64)> {
         let (w, h) = (
             self.canvas.client_width() as f64,
             self.canvas.client_height() as f64,
         );
-        let radius = self.camera.radius;
-        if p.dot(self.camera.eye()) <= radius {
+        if !self.camera.projection.shows(p) {
             return None;
         }
-        let clip = self.camera.view_proj() * (p * radius).extend(1.0);
-        if clip.w <= 0.0 {
-            return None;
-        }
-        let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+        let clip = self.camera.view_proj() * (p * self.camera.radius).extend(1.0);
+        let (x, y) = (clip.x, clip.y);
         Some(((x + 1.0) / 2.0 * w, (1.0 - y) / 2.0 * h))
     }
 
@@ -201,8 +198,8 @@ impl App {
     pub(super) fn view_scale(&self) -> (LonLat, f64, f64) {
         let height_px = self.canvas.client_height().max(1) as f64;
         let corner = (1.0 + self.camera.aspect * self.camera.aspect).sqrt();
-        let center = LonLat::from_vec(self.camera.eye_dir());
-        let half_m = self.camera.altitude * (self.camera.fov_y / 2.0).tan();
+        let center = LonLat::from_vec(self.camera.focus);
+        let half_m = self.camera.half_height_m();
         (center, 2.0 * half_m / height_px, half_m * corner)
     }
 }

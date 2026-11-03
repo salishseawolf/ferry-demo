@@ -33,6 +33,7 @@ serde_json = { workspace = true }
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = [
+  "CanvasRenderingContext2d",
   "Clipboard",
   "Document",
   "DomTokenList",
@@ -43,6 +44,7 @@ web-sys = { version = "0.3.106", features = [
   "Headers",
   "HtmlCanvasElement",
   "HtmlCollection",
+  "HtmlImageElement",
   "HtmlInputElement",
   "KeyboardEvent",
   "Location",

@@ -55,9 +55,7 @@ impl App {
         // Cells along the rim reach past it; keep only the lines inside.
         let inside = |p: [f32; 3]| KITSAP_SLICE.contains(glam::Vec3::from_array(p).as_dvec3());
         lines.retain(|l| inside(l.a) && inside(l.b));
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_overlay(LAYER_CELLS, &lines);
-        }
+        self.set_overlay(LAYER_CELLS, lines);
         self.hex.built_for = Some(built_for);
         self.hex.built_m_per_px = m_per_px;
         self.hex.cells = cells.len();
@@ -75,15 +73,12 @@ impl App {
         let x_limit = scale + 2.0 * margin_px / w;
         let y_limit = scale + 2.0 * margin_px / h;
         let radius = self.camera.radius;
-        let eye = self.camera.eye();
+        let projection = self.camera.projection;
         let view_proj = self.camera.view_proj();
-        // On the near side, and inside the scaled screen.
+        // On the half shown, and inside the scaled screen.
         move |p: DVec3| {
             let clip = view_proj * (p * radius).extend(1.0);
-            p.dot(eye) > radius
-                && clip.w > 0.0
-                && (clip.x / clip.w).abs() <= x_limit
-                && (clip.y / clip.w).abs() <= y_limit
+            projection.shows(p) && clip.x.abs() <= x_limit && clip.y.abs() <= y_limit
         }
     }
 
