@@ -1031,7 +1031,7 @@ fn create_normals_pass(
 }
 
 /// Canvas size in physical pixels, never zero.
-fn displayed_size(canvas: &HtmlCanvasElement) -> (u32, u32) {
+pub(crate) fn displayed_size(canvas: &HtmlCanvasElement) -> (u32, u32) {
     let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
     let width = ((canvas.client_width() as f64 * dpr) as u32).max(1);
     let height = ((canvas.client_height() as f64 * dpr) as u32).max(1);

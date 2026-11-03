@@ -1,176 +1,239 @@
-use glam::dcamera::rh;
-use glam::{DMat4, DQuat, DVec3, DVec4};
+use glam::{DMat4, DVec2, DVec3, DVec4};
 
-use crate::geo::LonLat;
+use crate::geo::{Cap, LonLat};
 
 /// About 2 km up: low enough to pick out single ferry-scale cells.
 const MIN_ALTITUDE_RADII: f64 = 3e-4;
-const MAX_ALTITUDE_RADII: f64 = 10.0;
-const MAX_PITCH: f64 = 89f64.to_radians();
+/// The zoom is given as the height a camera with this vertical field of
+/// view would look down from to see as much ground (`altitude`), as the
+/// globe's camera did: links and the scales tuned to it keep working.
+const FOV_Y: f64 = std::f64::consts::FRAC_PI_4;
+/// Depth runs from this high above the surface (m), clear of any terrain
+/// at any exaggeration, down to the planet's center.
+const DEPTH_TOP_M: f64 = 20_000.0;
 
-/// Orbit camera always looking at the planet's center. Math is f64 because
-/// world units are meters at planetary scale; values drop to f32 for the GPU.
-pub struct OrbitCamera {
+/// The flat map: the planet seen straight down its `area`'s center from
+/// infinitely far (an orthographic projection), north up. Over an area a
+/// few hundred kilometers across that's as good as flat, and every point
+/// on the near half of the planet has one place on it, the same however
+/// the view moves. Math is f64 because world units are meters at
+/// planetary scale; values drop to f32 for the GPU.
+pub struct MapCamera {
     pub radius: f64,
-    pub yaw: f64,
-    pub pitch: f64,
-    /// Distance from the eye to the surface, in meters.
+    pub projection: Projection,
+    /// What the view keeps within: none of the screen ever shows beyond
+    /// it, so zooming out stops once the screen's corners reach its edge,
+    /// and panning stops there.
+    area: Cap,
+    /// The point under the view's center (a unit vector).
+    pub focus: DVec3,
+    /// How far in, as the height (m) the globe's camera would have seen
+    /// as much from (see `FOV_Y`).
     pub altitude: f64,
-    pub fov_y: f64,
     pub aspect: f64,
 }
 
-/// A ray in world space with a normalized direction.
-pub struct Ray {
-    pub origin: DVec3,
-    pub dir: DVec3,
+/// The orthographic projection down a point's vertical: positions on the
+/// plane through the planet's center square to it, in meters east and
+/// north of that point.
+#[derive(Clone, Copy, Debug)]
+pub struct Projection {
+    pub radius: f64,
+    pub up: DVec3,
+    pub east: DVec3,
+    pub north: DVec3,
 }
 
-impl OrbitCamera {
-    /// Camera hovering over `target` at `altitude_radii` planet radii up.
-    pub fn over(radius: f64, target: LonLat, altitude_radii: f64, aspect: f64) -> Self {
-        let d = target.to_unit();
+impl Projection {
+    pub fn about(center: LonLat, radius: f64) -> Self {
+        let (east, north) = center.east_north();
         Self {
             radius,
-            yaw: d.x.atan2(d.z),
-            pitch: d.y.asin(),
-            altitude: altitude_radii * radius,
-            fov_y: 45f64.to_radians(),
+            up: center.to_unit(),
+            east,
+            north,
+        }
+    }
+
+    /// Where the direction `p` (a unit vector) lands on the map (m).
+    pub fn place(&self, p: DVec3) -> DVec2 {
+        DVec2::new(p.dot(self.east), p.dot(self.north)) * self.radius
+    }
+
+    /// The point on the near half of the planet (a unit vector) that lands
+    /// at `xy` on the map, if any does.
+    pub fn point_at(&self, xy: DVec2) -> Option<DVec3> {
+        let (e, n) = (xy.x / self.radius, xy.y / self.radius);
+        let up = 1.0 - e * e - n * n;
+        (up >= 0.0).then(|| self.east * e + self.north * n + self.up * up.sqrt())
+    }
+
+    /// Whether the direction `p` is on the near half, the half shown.
+    pub fn shows(&self, p: DVec3) -> bool {
+        p.dot(self.up) > 0.0
+    }
+}
+
+impl MapCamera {
+    /// The map of `area`, over `focus` at `altitude_m` (see `altitude`),
+    /// both kept within its limits.
+    pub fn new(radius: f64, area: Cap, focus: LonLat, altitude_m: f64, aspect: f64) -> Self {
+        let mut camera = Self {
+            radius,
+            projection: Projection::about(area.center, radius),
+            area,
+            focus: area.center.to_unit(),
+            altitude: altitude_m,
             aspect,
-        }
-    }
-
-    /// Unit vector from the planet center toward the eye.
-    pub fn eye_dir(&self) -> DVec3 {
-        DVec3::new(
-            self.pitch.cos() * self.yaw.sin(),
-            self.pitch.sin(),
-            self.pitch.cos() * self.yaw.cos(),
-        )
-    }
-
-    pub fn eye(&self) -> DVec3 {
-        self.eye_dir() * (self.radius + self.altitude)
-    }
-
-    /// Rotate by a pointer drag of (dx, dy) CSS pixels so the surface roughly
-    /// follows the cursor. Slower when zoomed in.
-    pub fn drag(&mut self, dx: f64, dy: f64) {
-        let rad_per_px = 0.003 * (self.altitude / self.radius).clamp(MIN_ALTITUDE_RADII, 1.5);
-        self.yaw -= dx * rad_per_px;
-        self.pitch = (self.pitch + dy * rad_per_px).clamp(-MAX_PITCH, MAX_PITCH);
-    }
-
-    /// Orbit so the surface point `grabbed` (a unit vector) lies under the
-    /// cursor at normalized device coordinates (x, y), as if the globe were
-    /// held there and pushed around. Returns false, leaving the camera
-    /// unchanged, when the cursor isn't over the globe.
-    ///
-    /// Solves for yaw and pitch with Newton's method: the residual is how far
-    /// the point under the cursor sits from `grabbed`, measured in the tangent
-    /// plane at `grabbed`. One shortest-arc rotation gives the starting guess
-    /// for large moves. The target is always the original grab point, so
-    /// error never accumulates over a long drag.
-    pub fn drag_to(&mut self, grabbed: DVec3, ndc_x: f64, ndc_y: f64) -> bool {
-        let (yaw0, pitch0) = (self.yaw, self.pitch);
-        let Some(under) = self.unit_under(ndc_x, ndc_y) else {
-            return false;
         };
-        self.set_eye_dir(DQuat::from_rotation_arc(under, grabbed) * self.eye_dir());
-
-        let (t1, t2) = tangent_basis(grabbed);
-        let residual = |cam: &Self| cam.unit_under(ndc_x, ndc_y).map(|u| (u.dot(t1), u.dot(t2)));
-        const H: f64 = 1e-7;
-        for _ in 0..8 {
-            let Some(r) = residual(self) else { break };
-            if r.0.hypot(r.1) < 1e-12 {
-                break;
-            }
-            let (yaw, pitch) = (self.yaw, self.pitch);
-            self.yaw = yaw + H;
-            let ry = residual(self);
-            self.yaw = yaw;
-            self.pitch = pitch + H;
-            let rp = residual(self);
-            self.pitch = pitch;
-            let (Some(ry), Some(rp)) = (ry, rp) else {
-                break;
-            };
-            // Jacobian columns: d(residual)/d(yaw), d(residual)/d(pitch).
-            let (a, c) = ((ry.0 - r.0) / H, (ry.1 - r.1) / H);
-            let (b, d) = ((rp.0 - r.0) / H, (rp.1 - r.1) / H);
-            let det = a * d - b * c;
-            if det.abs() < 1e-18 {
-                break;
-            }
-            self.yaw -= (d * r.0 - b * r.1) / det;
-            self.pitch = (self.pitch - (a * r.1 - c * r.0) / det).clamp(-MAX_PITCH, MAX_PITCH);
-        }
-        if self.unit_under(ndc_x, ndc_y).is_none() {
-            (self.yaw, self.pitch) = (yaw0, pitch0);
-            return false;
-        }
-        true
+        // The zoom first: how near the edge the view can go depends on it.
+        camera.zoom(0.0);
+        camera.set_focus(focus.to_unit());
+        camera
     }
 
-    fn unit_under(&self, ndc_x: f64, ndc_y: f64) -> Option<DVec3> {
-        ray_sphere(&self.ray(ndc_x, ndc_y), self.radius).map(DVec3::normalize)
+    /// Half the view's height on the ground (m).
+    pub fn half_height_m(&self) -> f64 {
+        self.altitude * (FOV_Y / 2.0).tan()
     }
 
-    pub fn set_eye_dir(&mut self, d: DVec3) {
-        self.yaw = d.x.atan2(d.z);
-        self.pitch = d.y.clamp(-1.0, 1.0).asin().clamp(-MAX_PITCH, MAX_PITCH);
+    /// Ground meters across one pixel, for a view `height_px` tall.
+    pub fn m_per_px(&self, height_px: f64) -> f64 {
+        2.0 * self.half_height_m() / height_px.max(1.0)
+    }
+
+    /// The view's center on the map (m).
+    pub fn center(&self) -> DVec2 {
+        self.projection.place(self.focus)
+    }
+
+    /// Moves the view's center over `p` (a unit vector), or as near as it
+    /// can with the whole screen over the area.
+    pub fn set_focus(&mut self, p: DVec3) {
+        let reach = (self.area_radius_m() - self.half_diagonal_m()).max(0.0);
+        let xy = if self.projection.shows(p) {
+            self.projection.place(p)
+        } else {
+            self.projection.place(p).normalize_or_zero() * reach
+        };
+        let xy = if xy.length() > reach {
+            xy.normalize_or_zero() * reach
+        } else {
+            xy
+        };
+        if let Some(p) = self.projection.point_at(xy) {
+            self.focus = p;
+        }
+    }
+
+    /// The window's shape changed (width over height): the view keeps its
+    /// height on the ground, within the limits.
+    pub fn set_aspect(&mut self, aspect: f64) {
+        if aspect != self.aspect {
+            self.aspect = aspect;
+            self.zoom(0.0);
+        }
+    }
+
+    /// The area's radius on the map (m).
+    fn area_radius_m(&self) -> f64 {
+        self.area.angle().sin() * self.radius
+    }
+
+    /// From the view's center to a corner, on the ground (m).
+    fn half_diagonal_m(&self) -> f64 {
+        self.half_height_m() * (1.0 + self.aspect * self.aspect).sqrt()
+    }
+
+    /// Moves the view so the surface point `grabbed` (a unit vector) lies
+    /// under the cursor at normalized device coordinates (x, y), as if the
+    /// map were held there and pushed around.
+    pub fn drag_to(&mut self, grabbed: DVec3, ndc_x: f64, ndc_y: f64) {
+        let offset = self.ndc_to_m(ndc_x, ndc_y);
+        let center = self.projection.place(grabbed) - offset;
+        if let Some(p) = self.projection.point_at(center) {
+            self.set_focus(p);
+        }
     }
 
     /// Zoom by scaling altitude; positive `amount` zooms out.
+    /// The screen stays over the area: zoomed out, the view moves in from
+    /// its edge.
     pub fn zoom(&mut self, amount: f64) {
-        self.altitude = (self.altitude * amount.exp()).clamp(
-            MIN_ALTITUDE_RADII * self.radius,
-            MAX_ALTITUDE_RADII * self.radius,
-        );
+        let corner = (FOV_Y / 2.0).tan() * (1.0 + self.aspect * self.aspect).sqrt();
+        let max = self.area_radius_m() / corner;
+        self.altitude = (self.altitude * amount.exp()).clamp(MIN_ALTITUDE_RADII * self.radius, max);
+        self.set_focus(self.focus);
     }
 
-    pub fn view_proj(&self) -> DMat4 {
-        let view = rh::view::look_at_mat4(self.eye(), DVec3::ZERO, DVec3::Y);
-        // Near and far track altitude to keep depth precision usable from
-        // orbit down to low altitude. WebGPU clip space matches DirectX.
-        let near = self.altitude * 0.1;
-        let far = self.altitude + 2.0 * self.radius;
-        let proj = rh::proj::directx::perspective(self.fov_y, self.aspect, near, far);
-        proj * view
+    /// Zoom as `zoom` does, keeping the point at normalized device
+    /// coordinates (x, y) where it is on screen.
+    pub fn zoom_at(&mut self, amount: f64, ndc_x: f64, ndc_y: f64) {
+        let Some(held) = self.surface_at(ndc_x, ndc_y) else {
+            self.zoom(amount);
+            return;
+        };
+        self.zoom(amount);
+        self.drag_to(held, ndc_x, ndc_y);
     }
 
-    /// Ray through normalized device coordinates (x right, y up, in -1..1).
-    pub fn ray(&self, ndc_x: f64, ndc_y: f64) -> Ray {
-        let inv = self.view_proj().inverse();
-        let near = inv * DVec4::new(ndc_x, ndc_y, 0.0, 1.0);
-        let far = inv * DVec4::new(ndc_x, ndc_y, 1.0, 1.0);
-        let near = near.truncate() / near.w;
-        let far = far.truncate() / far.w;
-        Ray {
-            origin: near,
-            dir: (far - near).normalize(),
+    /// Shows exactly the square of the map `half_m` (m) either side of
+    /// `center`, whatever the limits, in a square window: for baking the
+    /// basemap.
+    pub fn show_square(&mut self, center: DVec2, half_m: f64) {
+        if let Some(p) = self.projection.point_at(center) {
+            self.focus = p;
         }
+        self.altitude = half_m / (FOV_Y / 2.0).tan();
+        self.aspect = 1.0;
     }
-}
 
-/// Two unit vectors spanning the tangent plane at unit vector `n`.
-fn tangent_basis(n: DVec3) -> (DVec3, DVec3) {
-    let helper = if n.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
-    let t1 = n.cross(helper).normalize();
-    (t1, n.cross(t1))
+    /// Meters on the map from the view's center to normalized device
+    /// coordinates (x, y).
+    fn ndc_to_m(&self, ndc_x: f64, ndc_y: f64) -> DVec2 {
+        let half = self.half_height_m();
+        DVec2::new(ndc_x * half * self.aspect, ndc_y * half)
+    }
+
+    /// The surface point (a unit vector) at normalized device coordinates
+    /// (x right, y up, in -1..1), if the planet is there.
+    pub fn surface_at(&self, ndc_x: f64, ndc_y: f64) -> Option<DVec3> {
+        self.projection
+            .point_at(self.center() + self.ndc_to_m(ndc_x, ndc_y))
+    }
+
+    /// From world positions (m) to clip space: east and north across the
+    /// view, and depth down from `DEPTH_TOP_M` above the surface to the
+    /// planet's center (WebGPU's 0..1). Clip w is always 1.
+    pub fn view_proj(&self) -> DMat4 {
+        let Projection {
+            up, east, north, ..
+        } = self.projection;
+        let half_h = self.half_height_m();
+        let half_w = half_h * self.aspect;
+        let center = self.center();
+        let top = self.radius + DEPTH_TOP_M;
+        let row = |axis: DVec3, scale: f64, offset: f64| (axis * scale).extend(offset);
+        DMat4::from_cols(
+            row(east, 1.0 / half_w, -center.x / half_w),
+            row(north, 1.0 / half_h, -center.y / half_h),
+            row(-up, 1.0 / top, 1.0),
+            DVec4::W,
+        )
+        .transpose()
+    }
 }
 
 /// A view as a link's fragment: the point under the middle of the view and
 /// the camera's height (m) over it, `at=47.51095,-122.46364,6430`. The
-/// camera looks straight down, north up, so that's the whole view.
+/// view looks straight down, north up, so that's the whole view.
 pub fn view_fragment(center: LonLat, altitude_m: f64) -> String {
     format!("at={:.5},{:.5},{:.0}", center.lat, center.lon, altitude_m)
 }
 
 /// The view in a link's fragment (`#at=…`, see `view_fragment`), if it
-/// names one, its height kept within the camera's range.
-pub fn parse_view_fragment(fragment: &str, radius: f64) -> Option<(LonLat, f64)> {
+/// names one. The camera keeps it within its limits.
+pub fn parse_view_fragment(fragment: &str) -> Option<(LonLat, f64)> {
     let at = fragment
         .trim_start_matches('#')
         .split('&')
@@ -180,39 +243,45 @@ pub fn parse_view_fragment(fragment: &str, radius: f64) -> Option<(LonLat, f64)>
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) || !altitude.is_finite() {
         return None;
     }
-    let altitude = altitude.clamp(MIN_ALTITUDE_RADII * radius, MAX_ALTITUDE_RADII * radius);
     Some((LonLat::new(lon, lat), altitude))
-}
-
-/// First point where `ray` enters the sphere of `radius` at the origin.
-pub fn ray_sphere(ray: &Ray, radius: f64) -> Option<DVec3> {
-    // |o + t d|^2 = r^2 with |d| = 1:  t^2 + 2 b t + c = 0
-    let b = ray.origin.dot(ray.dir);
-    let c = ray.origin.length_squared() - radius * radius;
-    let disc = b * b - c;
-    if disc < 0.0 {
-        return None;
-    }
-    let t = -b - disc.sqrt();
-    (t >= 0.0).then(|| ray.origin + ray.dir * t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geo::EARTH_RADIUS_M;
+
+    const AREA: Cap = Cap {
+        center: LonLat::new(-122.65, 47.64),
+        radius_m: 200_000.0,
+    };
+
+    fn camera(focus: LonLat, altitude_m: f64) -> MapCamera {
+        MapCamera::new(EARTH_RADIUS_M, AREA, focus, altitude_m, 1.5)
+    }
+
+    /// Where the camera draws `p` (a unit vector), in normalized device
+    /// coordinates.
+    fn ndc(cam: &MapCamera, p: DVec3) -> DVec2 {
+        let clip = cam.view_proj() * (p * cam.radius).extend(1.0);
+        assert_eq!(clip.w, 1.0);
+        clip.truncate().truncate()
+    }
+
+    /// Within a millimeter on the ground (angle_between can't resolve that).
+    fn close(a: DVec3, b: DVec3) -> bool {
+        (a - b).length() * EARTH_RADIUS_M < 1e-3
+    }
 
     #[test]
     fn writes_and_reads_views_in_links() {
-        let r = 6_371_000.0;
         let center = LonLat::new(-122.463639, 47.51095);
         let fragment = view_fragment(center, 6430.4);
         assert_eq!(fragment, "at=47.51095,-122.46364,6430");
-        let (back, altitude) = parse_view_fragment(&format!("#{fragment}"), r).unwrap();
+        let (back, altitude) = parse_view_fragment(&format!("#{fragment}")).unwrap();
         assert!((back.lat - 47.51095).abs() < 1e-9 && (back.lon + 122.46364).abs() < 1e-9);
         assert_eq!(altitude, 6430.0);
-        // Among other parts; too low a camera comes up to the lowest.
-        let (_, low) = parse_view_fragment("#x=1&at=47.5,-122.4,10", r).unwrap();
-        assert_eq!(low, MIN_ALTITUDE_RADII * r);
+        assert!(parse_view_fragment("#x=1&at=47.5,-122.4,10").is_some());
         for bad in [
             "",
             "#",
@@ -221,77 +290,101 @@ mod tests {
             "#at=a,b,c",
             "#at=47.5,-122.4,inf",
         ] {
-            assert_eq!(parse_view_fragment(bad, r), None, "{bad}");
+            assert_eq!(parse_view_fragment(bad), None, "{bad}");
         }
     }
-    use crate::geo::EARTH_RADIUS_M;
 
     #[test]
-    fn center_ray_hits_point_below_camera() {
-        let target = LonLat::new(-123.0, 48.5);
-        let cam = OrbitCamera::over(EARTH_RADIUS_M, target, 2.0, 1.5);
-        let hit = ray_sphere(&cam.ray(0.0, 0.0), EARTH_RADIUS_M).unwrap();
-        let p = LonLat::from_vec(hit);
+    fn projects_to_the_plane_and_back() {
+        let p = Projection::about(AREA.center, EARTH_RADIUS_M);
+        assert!(p.place(AREA.center.to_unit()).length() < 1e-6);
+        let seattle = LonLat::new(-122.34, 47.6).to_unit();
+        let xy = p.place(seattle);
+        // About 23 km east and 4.5 km south of the area's center.
         assert!(
-            (p.lon - target.lon).abs() < 1e-6 && (p.lat - target.lat).abs() < 1e-6,
-            "{p:?}"
+            (xy.x - 23_270.0).abs() < 100.0 && (xy.y + 4_450.0).abs() < 100.0,
+            "{xy}"
         );
-        assert!((hit.length() / EARTH_RADIUS_M - 1.0).abs() < 1e-9);
+        assert!(close(p.point_at(xy).unwrap(), seattle));
+        assert_eq!(p.point_at(DVec2::new(EARTH_RADIUS_M, 1.0)), None);
     }
 
     #[test]
-    fn corner_ray_misses_from_far_away() {
-        let cam = OrbitCamera::over(EARTH_RADIUS_M, LonLat::new(0.0, 0.0), 5.0, 1.0);
-        assert!(ray_sphere(&cam.ray(0.99, 0.99), EARTH_RADIUS_M).is_none());
+    fn the_center_of_the_view_is_its_focus() {
+        let target = LonLat::new(-122.5, 47.7);
+        let cam = camera(target, 20_000.0);
+        assert!(close(cam.surface_at(0.0, 0.0).unwrap(), target.to_unit()));
+        assert!(ndc(&cam, target.to_unit()).length() < 1e-9);
     }
 
     #[test]
-    fn screen_right_is_east() {
-        let cam = OrbitCamera::over(EARTH_RADIUS_M, LonLat::new(10.0, 0.0), 2.0, 1.0);
-        let left = LonLat::from_vec(ray_sphere(&cam.ray(-0.1, 0.0), EARTH_RADIUS_M).unwrap());
-        let right = LonLat::from_vec(ray_sphere(&cam.ray(0.1, 0.0), EARTH_RADIUS_M).unwrap());
-        assert!(right.lon > left.lon);
+    fn east_is_right_and_north_is_up() {
+        let cam = camera(AREA.center, 20_000.0);
+        let at = |x, y| LonLat::from_vec(cam.surface_at(x, y).unwrap());
+        assert!(at(0.5, 0.0).lon > at(-0.5, 0.0).lon);
+        assert!(at(0.0, 0.5).lat > at(0.0, -0.5).lat);
     }
 
-    /// The grabbed point must end up back under the cursor.
-    fn assert_grab_follows(cam: &mut OrbitCamera, from: (f64, f64), to: (f64, f64)) {
-        let grabbed = ray_sphere(&cam.ray(from.0, from.1), cam.radius)
-            .unwrap()
-            .normalize();
-        assert!(cam.drag_to(grabbed, to.0, to.1));
-        let under = ray_sphere(&cam.ray(to.0, to.1), cam.radius)
-            .unwrap()
-            .normalize();
-        assert!(
-            under.angle_between(grabbed) < 1e-6,
-            "off by {} rad",
-            under.angle_between(grabbed)
-        );
+    #[test]
+    fn surface_points_draw_where_they_are_found() {
+        let cam = camera(LonLat::new(-122.4, 47.9), 80_000.0);
+        for (x, y) in [(0.3, -0.7), (-0.9, 0.9), (0.0, 0.2)] {
+            let p = cam.surface_at(x, y).unwrap();
+            let back = ndc(&cam, p);
+            assert!((back - DVec2::new(x, y)).length() < 1e-9, "{back}");
+        }
+        // Higher points are nearer the eye: smaller depth.
+        let p = cam.surface_at(0.1, 0.1).unwrap();
+        let depth = |h: f64| (cam.view_proj() * (p * (cam.radius + h)).extend(1.0)).z;
+        assert!(depth(1000.0) < depth(0.0) && depth(0.0) < 1.0 && depth(DEPTH_TOP_M - 1.0) > 0.0);
     }
 
     #[test]
     fn drag_keeps_grabbed_point_under_cursor() {
-        let mut cam = OrbitCamera::over(EARTH_RADIUS_M, LonLat::new(-123.0, 48.5), 2.0, 1.6);
-        assert_grab_follows(&mut cam, (0.1, 0.05), (-0.25, 0.2));
-        assert_grab_follows(&mut cam, (-0.3, -0.2), (0.3, 0.25));
-        // Diagonal drag away from screen center, where camera roll matters most.
-        assert_grab_follows(&mut cam, (0.35, 0.35), (-0.1, -0.3));
+        let mut cam = camera(AREA.center, 30_000.0);
+        let grabbed = cam.surface_at(0.1, 0.05).unwrap();
+        cam.drag_to(grabbed, -0.25, 0.2);
+        assert!(close(cam.surface_at(-0.25, 0.2).unwrap(), grabbed));
     }
 
     #[test]
-    fn drag_off_globe_leaves_camera_alone() {
-        let mut cam = OrbitCamera::over(EARTH_RADIUS_M, LonLat::new(0.0, 0.0), 5.0, 1.0);
-        let (yaw, pitch) = (cam.yaw, cam.pitch);
-        assert!(!cam.drag_to(DVec3::X, 0.99, 0.99));
-        assert_eq!((cam.yaw, cam.pitch), (yaw, pitch));
+    fn zooming_at_a_point_keeps_it_there() {
+        let mut cam = camera(AREA.center, 30_000.0);
+        let held = cam.surface_at(0.6, -0.4).unwrap();
+        cam.zoom_at(-0.5, 0.6, -0.4);
+        assert!(cam.altitude < 30_000.0);
+        assert!(close(cam.surface_at(0.6, -0.4).unwrap(), held));
+    }
+
+    #[test]
+    fn the_view_stays_over_the_area() {
+        let edge = AREA.angle().sin() * EARTH_RADIUS_M;
+        // Far away, or on the other side of the planet: brought in until
+        // the screen's corners reach the edge.
+        for far in [LonLat::new(-110.0, 47.64), LonLat::new(57.35, -47.64)] {
+            let cam = camera(far, 30_000.0);
+            let off = cam.center().length() + cam.half_diagonal_m();
+            assert!((off - edge).abs() < 1.0, "{off}");
+        }
+        // Zoomed out from near the edge: the view moves in.
+        let mut cam = camera(LonLat::new(-122.65, 49.3), 30_000.0);
+        cam.zoom(100.0);
+        assert!(cam.center().length() < 1.0);
+        // A narrower window can see more of the area's height.
+        let wide = cam.altitude;
+        cam.set_aspect(0.5);
+        cam.zoom(100.0);
+        assert!(cam.altitude > wide);
     }
 
     #[test]
     fn zoom_is_clamped() {
-        let mut cam = OrbitCamera::over(1.0, LonLat::new(0.0, 0.0), 2.0, 1.0);
+        let mut cam = camera(AREA.center, 30_000.0);
         cam.zoom(-100.0);
-        assert!((cam.altitude - MIN_ALTITUDE_RADII).abs() < 1e-12);
+        assert!((cam.altitude - MIN_ALTITUDE_RADII * EARTH_RADIUS_M).abs() < 1e-6);
         cam.zoom(100.0);
-        assert!((cam.altitude - MAX_ALTITUDE_RADII).abs() < 1e-12);
+        let corner_m = cam.half_diagonal_m();
+        let edge = AREA.angle().sin() * EARTH_RADIUS_M;
+        assert!((corner_m - edge).abs() < 1e-6, "{corner_m}");
     }
 }

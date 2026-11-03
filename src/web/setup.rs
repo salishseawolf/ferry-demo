@@ -4,14 +4,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::JsCast;
-use web_sys::{
-    Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent, PointerEvent, WheelEvent, Window,
-};
+use wasm_bindgen::prelude::*;
+use web_sys::{Element, HtmlCanvasElement, HtmlInputElement, KeyboardEvent};
 
-use crate::camera::{OrbitCamera, parse_view_fragment};
+use crate::basemap::Grid;
+use crate::camera::{MapCamera, parse_view_fragment};
 use crate::finder::{Finder, Sheet, Target};
 use crate::fleet::Fleet;
 use crate::geo::{EARTH_RADIUS_M, LonLat};
@@ -20,18 +19,20 @@ use crate::hexgrid::resolution_for;
 use crate::live::{network_feed, notices_feed, sailings_feed, vessel_feed, vessel_info_feed};
 use crate::measure::Measure;
 use crate::perf::FrameStats;
-use crate::renderer::Renderer;
 use crate::terminals::Terminals;
 use crate::terrain::Manifest;
-use crate::tiles::{TerrainLoader, load_index};
+use crate::tiles::TerrainLoader;
 use crate::view::STYLE_CARTOGRAPHIC;
 
+use super::bake::{self, Bake};
 use super::debug::Perf;
-use super::dom::{listen, now_ms, page_hidden, sleep_ms};
+use super::dom::{listen, now_ms, page_hidden};
 use super::fetches::Fetches;
 use super::hex::HexGrid;
 use super::labels::Labels;
+use super::map::Map;
 use super::measuring::MeasureBox;
+use super::modes;
 use super::no_map::NoMap;
 use super::notes::Notes;
 use super::{App, LAYER_TOGGLES, STYLE_CHOICES, TAB_RETURN_GRACE_MS, animate};
@@ -39,7 +40,7 @@ use super::{App, LAYER_TOGGLES, STYLE_CHOICES, TAB_RETURN_GRACE_MS, animate};
 /// Start over Kitsap County, the slice's center, high enough to see most
 /// of it.
 const START_VIEW: LonLat = KITSAP_SLICE.center;
-const START_ALTITUDE_RADII: f64 = 0.045;
+const START_ALTITUDE_M: f64 = 0.045 * EARTH_RADIUS_M;
 /// Crossing times fetched for a route are kept this long (ms) before
 /// they're asked for again; schedules (checked by the server every 10
 /// minutes) this long.
@@ -56,50 +57,51 @@ pub(super) async fn run() -> Result<(), String> {
             .get_element_by_id(id)
             .ok_or_else(|| format!("missing #{id}"))
     };
-    let canvas: HtmlCanvasElement = element("world")?
+    let mut canvas: HtmlCanvasElement = element("world")?
         .dyn_into()
         .map_err(|_| "#world is not a canvas")?;
 
-    let map_lost = Arc::new(Mutex::new(None));
-    let (renderer, why_no_map) = match start_map(&window, &canvas).await {
-        Ok(renderer) => {
-            let lost = map_lost.clone();
-            renderer.on_device_lost(move |message| {
-                if let Ok(mut lost) = lost.lock() {
-                    *lost = Some(message);
+    // The GPU's map if it can, else the flat one over the prebaked tiles,
+    // else none (the list of boats in its place). The route network's
+    // credits are added when it arrives.
+    let map_lost = modes::Lost::default();
+    let baking = bake::asked(&window);
+    let gpu = if modes::asks_for_flat_map(&window) && !baking {
+        Err("the page asked for the flat map (?flat)")
+    } else {
+        modes::gpu_map(&window, &canvas, &map_lost).await
+    };
+    let empty = || Manifest::new([], KITSAP_SLICE);
+    let (renderer, manifest, credits_base, why_no_map) = match gpu {
+        Ok((map, manifest, credits)) => (Some(map), manifest, credits, None),
+        Err(why) => {
+            log::info!("no GPU map ({why}): drawing the prebaked tiles");
+            // The GPU may have taken this canvas's context first.
+            canvas = modes::fresh_canvas(&canvas)?;
+            match modes::flat_map(&canvas).await {
+                Ok((map, credits)) => (Some(map), empty(), credits, None),
+                Err(e) => {
+                    log::warn!("{e}");
+                    (None, empty(), modes::POSITIONS.to_string(), Some(why))
                 }
-            });
-            (Some(renderer), None)
+            }
         }
-        Err(why) => (None, Some(why)),
     };
-    // Without tiles the slice still renders, as the plain backdrop. The
-    // route network's credits are added when it arrives.
+    modes::show_mode(matches!(renderer, Some(Map::Flat(_))));
+    // The basemap tiles there's terrain for, if baking.
+    let bake_plan = match baking {
+        true => Grid::of(KITSAP_SLICE, EARTH_RADIUS_M).plan(&manifest),
+        false => Vec::new(),
+    };
     let credits = element("credits")?;
-    let positions = "Ferry positions: Washington State Department of Transportation";
-    let (manifest, credits_base) = match renderer.is_some() {
-        false => (Manifest::new([], KITSAP_SLICE), positions.to_string()),
-        true => match load_index("elevation").await {
-            Ok(index) => {
-                log::info!("terrain: {} tiles available", index.manifest.len());
-                let base = format!("Elevation: {} · {positions}", index.attribution.join(" · "));
-                (index.manifest, base)
-            }
-            Err(e) => {
-                log::warn!("no terrain tiles: {e}");
-                let base =
-                    "No elevation tiles: run <code>mise run tiles:elevation</code>, then rebuild."
-                        .to_string();
-                (Manifest::new([], KITSAP_SLICE), base)
-            }
-        },
-    };
     credits.set_inner_html(&credits_base);
     let aspect = canvas.client_width().max(1) as f64 / canvas.client_height().max(1) as f64;
     let app = Rc::new(RefCell::new(App {
         canvas: canvas.clone(),
         renderer,
         map_lost,
+        overlays: Vec::new(),
+        switches: 0,
         no_map: NoMap {
             root: element("no-map")?,
             why: element("no-map-why")?,
@@ -142,6 +144,7 @@ pub(super) async fn run() -> Result<(), String> {
             shown_at: 0.0,
         },
         terrain: TerrainLoader::new(manifest),
+        bake: baking.then(|| Bake::new(Grid::of(KITSAP_SLICE, EARTH_RADIUS_M))),
         resume_at_ms: 0.0,
         redraw: true,
         last_draw_ms: 0.0,
@@ -207,20 +210,7 @@ pub(super) async fn run() -> Result<(), String> {
         Some(why) => app.borrow_mut().lose_map(why),
     }
 
-    listen(&canvas, "pointerdown", &app, |app, e: PointerEvent| {
-        app.pointer_down(&e)
-    });
-    listen(&canvas, "pointermove", &app, |app, e: PointerEvent| {
-        app.pointer_move(&e)
-    });
-    listen(&canvas, "pointerup", &app, |app, e: PointerEvent| {
-        app.pointer_up(&e)
-    });
-    listen(&canvas, "pointerleave", &app, |app, _: PointerEvent| {
-        app.cursor = None;
-        app.redraw = true;
-    });
-    listen(&canvas, "wheel", &app, |app, e: WheelEvent| app.wheel(&e));
+    modes::listen_canvas(&canvas, &app);
     // A click on a notice dot opens or closes its note.
     let notes = element("notes")?;
     listen(&notes, "click", &app, |app, e: web_sys::Event| {
@@ -262,6 +252,12 @@ pub(super) async fn run() -> Result<(), String> {
             &app,
             move |app, _: web_sys::Event| app.set_layer(bit, input.checked()),
         );
+    }
+    // Baking: the terrain alone, nothing over it, and the script's handle.
+    if baking {
+        set_body_class("baking");
+        app.borrow_mut().layers = 0;
+        bake::expose(&app, &bake_plan);
     }
     // The map style's radio buttons (index.html, their values in
     // STYLE_CHOICES); the one checked there is the default.
@@ -315,6 +311,35 @@ pub(super) async fn run() -> Result<(), String> {
         &app,
         move |app, _: web_sys::Event| app.set_label_debug(label_toggle.checked()),
     );
+    // The debug panel's mode: the one the map is drawn in (`show_mode`),
+    // and the other a click away.
+    let modes = document
+        .query_selector_all("input[name=mode]")
+        .map_err(|_| "no mode choices")?;
+    for i in 0..modes.length() {
+        let Some(input) = modes
+            .item(i)
+            .and_then(|n| n.dyn_into::<HtmlInputElement>().ok())
+        else {
+            continue;
+        };
+        let app = app.clone();
+        let chosen = input.clone();
+        let closure = Closure::<dyn FnMut()>::new(move || {
+            if chosen.checked() {
+                modes::switch(app.clone(), chosen.value() == "flat");
+            }
+        });
+        let _ = input.add_event_listener_with_callback("change", closure.as_ref().unchecked_ref());
+        closure.forget();
+    }
+    // The note when the GPU's map couldn't start: back to the prebaked
+    // tiles.
+    let back = element("map-error-switch")?;
+    let app_back = app.clone();
+    let closure = Closure::<dyn FnMut()>::new(move || modes::switch(app_back.clone(), true));
+    let _ = back.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
+    closure.forget();
     // A boat or route in the list in the map's place comes up in the
     // finder, as a click on it on the map would.
     let no_map_list = element("no-map-list")?;
@@ -475,42 +500,21 @@ pub(super) async fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// The map's renderer, or why there's none, as the page says it (the
-/// details go to the console).
-async fn start_map(window: &Window, canvas: &HtmlCanvasElement) -> Result<Renderer, &'static str> {
-    if !window.is_secure_context() {
-        return Err("The map needs a secure connection: open this page over https.");
+fn set_body_class(class: &str) {
+    if let Some(body) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.body())
+    {
+        let _ = body.class_list().add_1(class);
     }
-    let has_webgpu = js_sys::Reflect::has(&window.navigator(), &"gpu".into()).unwrap_or(false);
-    if !has_webgpu {
-        return Err("The map needs WebGPU, which this browser doesn't offer or has turned off.");
-    }
-    // A page reloaded in a background tab (the dev server does this) waits
-    // until it's shown, and a moment more, before touching the GPU.
-    if page_hidden() {
-        while page_hidden() {
-            sleep_ms(100.0).await;
-        }
-        sleep_ms(TAB_RETURN_GRACE_MS).await;
-    }
-    Renderer::new(canvas.clone(), &KITSAP_SLICE)
-        .await
-        .map_err(|e| {
-            log::warn!("{e}");
-            "The map needs a GPU, and this browser found none it can draw with."
-        })
 }
 
 /// The camera to start with: the view in the page's link (`#at=…`, the
 /// debug panel's link), or over the slice.
-fn start_camera(aspect: f64) -> OrbitCamera {
+fn start_camera(aspect: f64) -> MapCamera {
     let linked = web_sys::window()
         .and_then(|w| w.location().hash().ok())
-        .and_then(|hash| parse_view_fragment(&hash, EARTH_RADIUS_M));
-    match linked {
-        Some((center, altitude)) => {
-            OrbitCamera::over(EARTH_RADIUS_M, center, altitude / EARTH_RADIUS_M, aspect)
-        }
-        None => OrbitCamera::over(EARTH_RADIUS_M, START_VIEW, START_ALTITUDE_RADII, aspect),
-    }
+        .and_then(|hash| parse_view_fragment(&hash));
+    let (center, altitude) = linked.unwrap_or((START_VIEW, START_ALTITUDE_M));
+    MapCamera::new(EARTH_RADIUS_M, KITSAP_SLICE, center, altitude, aspect)
 }

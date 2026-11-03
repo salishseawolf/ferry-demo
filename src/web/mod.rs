@@ -1,8 +1,9 @@
-//! The app in the browser: the globe, its ferries and the panels over
-//! it, drawn each frame by `App`. Without a GPU to draw the globe, the
+//! The app in the browser: the map, its ferries and the panels over
+//! it, drawn each frame by `App`. Without a GPU to draw the map, the
 //! panels work all the same, with a list of the boats in its place
 //! (`no_map`).
 
+mod bake;
 mod debug;
 mod dom;
 mod ferries;
@@ -10,7 +11,9 @@ mod fetches;
 mod fit;
 mod hex;
 mod labels;
+mod map;
 mod measuring;
+mod modes;
 mod no_map;
 mod notes;
 mod picking;
@@ -19,13 +22,12 @@ mod setup;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, WheelEvent};
 
-use crate::camera::{OrbitCamera, ray_sphere};
+use crate::camera::MapCamera;
 use crate::finder::{self, Finder, Loaded, Scope, Sheet, Target};
 use crate::fleet::{Fleet, Vessel, dimensions_from, vessels_from};
 use crate::geo::{EARTH_RADIUS_M, LonLat};
@@ -35,11 +37,11 @@ use crate::legend;
 use crate::live::{Feed, Update, VESSELS_MS};
 use crate::measure::Measure;
 use crate::palette;
-use crate::renderer::{Globals, Renderer};
+use crate::renderer::Globals;
 use crate::routes::{self, Leg, ServiceRoute};
-use crate::scene::{HOVER_CELL_COLOR, Scene};
+use crate::scene::{HOVER_CELL_COLOR, Scene, Segment};
 use crate::terminals::{Terminals, bulletins_from, sailings_from};
-use crate::terrain::GlobeView;
+use crate::terrain::MapView;
 use crate::tiles::TerrainLoader;
 use crate::view::{LAYER_CELLS, LAYER_FERRIES, STYLE_CARTOGRAPHIC, STYLE_HYPSOMETRIC};
 use ferry_model::api::{
@@ -54,6 +56,7 @@ use fetches::Fetches;
 use fit::Flight;
 use hex::HexGrid;
 use labels::Labels;
+use map::Map;
 use measuring::MeasureBox;
 use no_map::NoMap;
 use notes::{Notes, html_escape};
@@ -199,11 +202,16 @@ struct App {
     canvas: HtmlCanvasElement,
     /// None when the browser can't draw the map, or stopped being able
     /// to: `no_map` shows instead.
-    renderer: Option<Renderer>,
+    renderer: Option<Map>,
     /// Why the GPU was lost, once it is (set from the device's callback).
-    map_lost: Arc<Mutex<Option<String>>>,
+    map_lost: modes::Lost,
+    /// The lines of each overlay (`renderer::OVERLAYS`) as last set, for a
+    /// renderer started later (`modes::switch`).
+    overlays: Vec<(u32, Vec<Segment>)>,
+    /// Mode switches begun (`modes::switch`), so only the latest lands.
+    switches: u32,
     no_map: NoMap,
-    camera: OrbitCamera,
+    camera: MapCamera,
     measure: Measure,
     /// Last on-planet cursor position while measuring, so the box keeps
     /// the live reading when the cursor leaves to click the copy button.
@@ -299,6 +307,8 @@ struct App {
     vessels_due_ms: f64,
     vessels_step_ms: f64,
     hud_vessel: Element,
+    /// Baking the basemap (`?bake`): nothing but the terrain is drawn.
+    bake: Option<bake::Bake>,
 }
 
 impl App {
@@ -322,7 +332,7 @@ impl App {
     /// off the slice (drags can grab the planet beyond its edge).
     fn surface_at(&self, pos: (f64, f64)) -> Option<DVec3> {
         let (x, y) = self.ndc(pos);
-        ray_sphere(&self.camera.ray(x, y), self.camera.radius).map(DVec3::normalize)
+        self.camera.surface_at(x, y)
     }
 
     fn set_style(&mut self, style: u32) {
@@ -419,7 +429,7 @@ impl App {
         let wanted = self.redraw
             || vessels_due
             || self.terrain.busy()
-            || self.renderer.as_ref().is_some_and(Renderer::needs_frame);
+            || self.renderer.as_ref().is_some_and(Map::needs_frame);
         if !paused && wanted && self.renderer.is_some() {
             // After an idle spell, average afresh: the gap isn't a slow
             // frame. Short gaps (between mouse events) are just activity.
@@ -428,6 +438,9 @@ impl App {
             }
             self.redraw = false;
             self.draw_frame();
+            if let Some(bake) = &mut self.bake {
+                bake.ready = !self.terrain.busy();
+            }
             self.perf.stats.record(time_ms, now_ms() - start);
             self.last_draw_ms = time_ms;
             self.vessels_due_ms = time_ms + self.vessels_step_ms;
@@ -469,9 +482,7 @@ impl App {
                 }
             })
             .collect();
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_overlay(LAYER_FERRIES, &scene.segments);
-        }
+        self.set_overlay(LAYER_FERRIES, scene.segments);
         self.legs = network
             .legs
             .iter()
@@ -854,10 +865,10 @@ impl App {
     }
 
     fn draw_frame(&mut self) {
-        let Some((width, height)) = self.renderer.as_mut().map(Renderer::sync_size) else {
+        let Some((width, height)) = self.renderer.as_mut().map(Map::sync_size) else {
             return;
         };
-        self.camera.aspect = width as f64 / height as f64;
+        self.camera.set_aspect(width as f64 / height as f64);
         let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
 
         if let Some((at, _)) = self.pending_click {
@@ -887,20 +898,27 @@ impl App {
         if !self.measure.is_finished() && hover.is_some() {
             self.measure_end = hover;
         }
-        let mut scene = Scene::build(&self.measure, hover, self.camera.radius, marker_scale);
-        self.add_ferries(&mut scene);
-        self.update_hex_grid();
-        if let Some(h) = hover.filter(|_| self.layers & LAYER_CELLS != 0) {
-            let cell = h3_cell(h, self.hex.resolution);
-            scene.add_outline(&boundary(cell), self.camera.radius, HOVER_CELL_COLOR);
+        let mut scene = Scene::default();
+        if self.bake.is_none() {
+            scene = Scene::build(&self.measure, hover, self.camera.radius, marker_scale);
+            self.add_ferries(&mut scene);
+            self.update_hex_grid();
+            if let Some(h) = hover.filter(|_| self.layers & LAYER_CELLS != 0) {
+                let cell = h3_cell(h, self.hex.resolution);
+                scene.add_outline(&boundary(cell), self.camera.radius, HOVER_CELL_COLOR);
+            }
         }
         // Tile detail follows CSS pixels: finer on high-DPI screens would
         // quadruple the tiles for little visible gain.
         let height_px = self.canvas.client_height().max(1) as f64;
-        let view = GlobeView::new(&self.camera, height_px);
-        if let Some(renderer) = &mut self.renderer {
-            let regions = self.terrain.update(renderer, &view);
-            renderer.render(&globals, &scene, &regions);
+        let view = MapView::new(&self.camera, height_px);
+        match &mut self.renderer {
+            Some(Map::Gpu(renderer)) => {
+                let regions = self.terrain.update(renderer, &view);
+                renderer.render(&globals, &scene, &regions);
+            }
+            Some(Map::Flat(renderer)) => renderer.render(&self.camera, &globals, &scene),
+            None => {}
         }
         self.update_measure_box();
         // A click: fly to what it was on, and bring that up in the finder.
@@ -914,6 +932,24 @@ impl App {
                 self.cursor = None;
             }
             self.redraw = true;
+        }
+    }
+
+    /// Replaces the lines of the overlay drawn for `layer`.
+    fn set_overlay(&mut self, layer: u32, segments: Vec<Segment>) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_overlay(layer, &segments);
+        }
+        self.overlays.retain(|(l, _)| *l != layer);
+        self.overlays.push((layer, segments));
+    }
+
+    /// Gives a newly started renderer the overlays' lines.
+    fn replay_overlays(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            for (layer, segments) in &self.overlays {
+                renderer.set_overlay(*layer, segments);
+            }
         }
     }
 
@@ -961,13 +997,11 @@ impl App {
         if let Some(press) = &mut self.press {
             let moved = (pos.0 - press.start.0).hypot(pos.1 - press.start.1);
             press.dragging |= moved > CLICK_SLOP_PX;
-            if press.dragging {
-                // Push the globe by the grabbed point; fall back to pixel
-                // rotation when the press or the cursor is off the globe.
-                let grabbed = press.grabbed.is_some_and(|g| self.camera.drag_to(g, x, y));
-                if !grabbed {
-                    self.camera.drag(pos.0 - press.last.0, pos.1 - press.last.1);
-                }
+            // Push the map by the grabbed point.
+            if press.dragging
+                && let Some(grabbed) = press.grabbed
+            {
+                self.camera.drag_to(grabbed, x, y);
             }
             press.last = pos;
         }
@@ -1036,7 +1070,9 @@ impl App {
         e.prevent_default();
         // deltaMode 1 is lines; treat a line as about 16 px.
         let px = e.delta_y() * if e.delta_mode() == 1 { 16.0 } else { 1.0 };
-        self.camera.zoom(px * 0.001);
+        // About the cursor, which keeps the ground under it.
+        let (x, y) = self.ndc((e.offset_x() as f64, e.offset_y() as f64));
+        self.camera.zoom_at(px * 0.001, x, y);
     }
 }
 

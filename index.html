@@ -397,6 +397,8 @@
       /* Its own row each: the label switch, then the copy button. */
       #perf .foot { flex: none; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--rule); }
       #perf .foot .switch { padding: 0; border-top: 0; }
+      #perf .mode { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      #perf .mode .chip { padding: 5px 9px; font-size: 12px; }
       #perf .foot .copy-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 32px; font: 600 12.5px/1 var(--sans); }
       #perf dd { overflow-wrap: anywhere; }
       #perf dd { margin: 0; text-align: right; font-family: var(--mono); }
@@ -412,6 +414,17 @@
       /* display: grid above beats the UA's [hidden] rule; without this the
          empty overlay covers the canvas and swallows all pointer events. */
       #error[hidden] { display: none; }
+      #map-error {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 3;
+        width: min(360px, calc(100vw - 48px)); padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
+      }
+      #map-error[hidden] { display: none; }
+      #map-error p { margin: 0; font-size: 13px; }
+
+      /* The flat map (web/map.rs) has the baked basemap's one style. */
+      .flat-map .gpu-only { display: none; }
+      /* Baking the basemap (web/bake.rs): the terrain alone. */
+      body.baking > :not(#world) { display: none !important; }
 
       /* No map (web/no_map.rs): the boats by route in its place, clear of
          the finder on its left, and what only works over the map hidden. */
@@ -525,9 +538,9 @@
       </div>
     </div>
     <div id="settings" class="paper" role="dialog" aria-label="Map settings" hidden>
-      <h2>Map style</h2>
+      <h2 class="gpu-only">Map style</h2>
       <!-- Values match STYLE_CHOICES in web/mod.rs. -->
-      <div class="chips" role="radiogroup" aria-label="Map style">
+      <div class="chips gpu-only" role="radiogroup" aria-label="Map style">
         <label class="chip"><input type="radio" name="style" value="cartographic" checked /> Cartographic</label>
         <label class="chip"><input type="radio" name="style" value="hypsometric" /> Height colors</label>
       </div>
@@ -572,6 +585,15 @@
       </div>
       <!-- At the bottom, which stays put as the rows above change. -->
       <div class="foot">
+        <!-- web/setup.rs checks the mode the map is drawn in; choosing the
+             other opens the view again in it (web/debug.rs). -->
+        <div class="mode">
+          <span>Mode</span>
+          <div class="chips" role="radiogroup" aria-label="Map mode">
+            <label class="chip"><input type="radio" name="mode" value="webgpu" /> WebGPU</label>
+            <label class="chip"><input type="radio" name="mode" value="flat" /> Prebaked tiles</label>
+          </div>
+        </div>
         <label class="switch">Label placement <input type="checkbox" id="debug-labels" /></label>
         <button type="button" id="perf-copy" class="copy-button" title="Copy to clipboard">
             <svg class="clip" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -587,5 +609,10 @@
     </div>
     <div id="credits"></div>
     <div id="error" hidden></div>
+    <!-- The GPU's map, chosen in the debug panel, couldn't start (web/modes.rs). -->
+    <div id="map-error" class="paper" role="alertdialog" aria-labelledby="map-error-text" hidden>
+      <p id="map-error-text"></p>
+      <button type="button" id="map-error-switch" class="tool">Switch to prebaked tiles</button>
+    </div>
   </body>
 </html>

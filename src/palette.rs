@@ -134,6 +134,22 @@ pub fn srgb_to_linear(c: f64) -> f64 {
     }
 }
 
+pub fn linear_to_srgb(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// A linear RGBA color, as the shaders take, as the CSS color they'd draw
+/// (they encode to sRGB as they go: `display` in common.wgsl).
+pub fn css_rgba(linear: [f32; 4]) -> String {
+    let [r, g, b] = [linear[0], linear[1], linear[2]]
+        .map(|c| (linear_to_srgb(f64::from(c)).clamp(0.0, 1.0) * 255.0).round() as u8);
+    format!("rgba({r},{g},{b},{:.3})", linear[3].clamp(0.0, 1.0))
+}
+
 /// CSS hex color for an sRGB color.
 pub fn css(srgb: [f64; 3]) -> String {
     let [r, g, b] = srgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -143,6 +159,13 @@ pub fn css(srgb: [f64; 3]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linear_colors_come_back_as_drawn() {
+        let teal = [0.2, 0.55, 0.6];
+        assert_eq!(css_rgba(linear_rgba(teal, 0.5)), "rgba(51,140,153,0.500)");
+        assert_eq!(css_rgba([0.0, 1.0, 2.0, 1.0]), "rgba(0,255,255,1.000)");
+    }
 
     #[test]
     fn ramps_ascend() {

@@ -3,7 +3,7 @@
 [![CI](https://github.com/salishseawolf/ferry-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/salishseawolf/ferry-demo/actions/workflows/ci.yml)
 [![Audit](https://github.com/salishseawolf/ferry-demo/actions/workflows/audit.yml/badge.svg)](https://github.com/salishseawolf/ferry-demo/actions/workflows/audit.yml)
 
-A live map of Washington State Ferries on a 3D globe of Puget Sound, written in Rust and rendered with WebGPU in the browser.
+A live map of Washington State Ferries over the terrain of Puget Sound, written in Rust and drawn with WebGPU in the browser. Browsers without a usable GPU get the same map flat, over terrain baked from the GPU's own drawing.
 
 - **Live boats:** every ferry's position, heading and wake every 10 seconds, drawn to scale on terrain and bathymetry.
 - **Schedules:** each terminal's and route's sailings for the day and at least the next 12 hours, with the next one held in view. Every published version is kept, so changes to the schedule can be compared with what was first promised.
@@ -16,7 +16,7 @@ A live map of Washington State Ferries on a 3D globe of Puget Sound, written in 
 
 | Part | What it is |
 |---|---|
-| `src/` | The app: Rust compiled to WebAssembly, rendering with wgpu (WebGPU). Terrain comes from pre-built tiles; the panels are plain HTML over the canvas. |
+| `src/` | The app: Rust compiled to WebAssembly, rendering with wgpu (WebGPU), or Canvas2D over the baked basemap without a GPU (`?flat` shows that on any browser). Terrain comes from pre-built tiles; the panels are plain HTML over the canvas. |
 | `crates/server` | The server (axum, sqlx, Postgres): polls WSF's API, keeps every answer, derives trips, car space and loads from them, works out arrival advice, and serves the app's API under `/api/v1/`. |
 | `crates/model` | What the two share: the API's documents, geodesy, the route network. |
 | `charts/ferry-demo` | The Helm chart that deploys it all to Kubernetes: see its [README](charts/ferry-demo/README.md). |
@@ -32,7 +32,7 @@ The tools are pinned with [mise](https://mise.jdx.dev); the services run with Po
 mise run dev
 ```
 
-That starts the app on http://localhost:8080, with the server and Postgres beside it. Live data needs a WSDOT Traveler API access code in `WSDOT_API_KEY`. The terrain tiles are built separately (`mise run tiles:elevation`, a large download) or come from the published tiles image.
+That starts the app on http://localhost:8080, with the server and Postgres beside it. Live data needs a WSDOT Traveler API access code in `WSDOT_API_KEY`. The terrain tiles are built separately (`mise run tiles:elevation`, a large download) or come from the published tiles image. The basemap for browsers without a GPU is baked from them with the app running (`mise run tiles:basemap`, a few minutes); bake it again whenever the terrain or its styling changes, before `tiles:publish`.
 
 Other tasks:
 
