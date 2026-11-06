@@ -78,7 +78,7 @@ FROM ${TILES} AS tiles
 
 # The app's image (the default target, or `--target web`): the static
 # files, served as non-root on 8080, with /api/v1/ passed to the server.
-FROM docker.io/nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6 AS web
+FROM docker.io/nginxinc/nginx-unprivileged:1.31-alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e AS web
 # Filled in at startup with the server's host:port (FERRY_API: by default
 # the same pod, as a Kubernetes sidecar would be).
 # Made first: a directory COPY --chmod creates gets the file's mode under
