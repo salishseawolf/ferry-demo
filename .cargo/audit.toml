@@ -1,0 +1,10 @@
+# Advisories cargo audit (the Audit workflow) skips, each with why. Check
+# them again whenever sqlx is upgraded.
+[advisories]
+ignore = [
+    # libsqlite3-sys 0.37 (C SQLite CVE-2026-119375). It is in Cargo.lock
+    # only because sqlx's macros list every driver; we use Postgres alone and
+    # `cargo tree -i libsqlite3-sys` finds nothing built. sqlx 0.9.0, the
+    # newest, still caps it below 0.38, so it can't be upgraded yet.
+    "RUSTSEC-2026-0459",
+]
