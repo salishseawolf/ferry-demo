@@ -5,7 +5,7 @@ ARG TILES=ghcr.io/salishseawolf/ferry-demo-tiles@sha256:f2d31d2ef7fae0a83db47cc3
 
 # The toolchain, with the same tool versions as mise.toml: shared by the
 # release build below and by the dev server (the `dev` stage, compose.yaml).
-FROM docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS toolchain
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS toolchain
 
 # gcc + libc6-dev is all Rust build scripts need on the host side.
 RUN apt-get update \
@@ -60,7 +60,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # The server's image (`podman build --target server`), as non-root, on
 # 8090. Configured from the environment: DATABASE_URL and WSDOT_API_KEY
 # (Secrets in the cluster, `op run` locally); see crates/server/src/config.rs.
-FROM docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS server
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS server
 # The system's certificates, for WSF's TLS.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
