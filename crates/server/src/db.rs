@@ -364,7 +364,7 @@ pub(crate) mod tests {
         pub(crate) async fn new() -> Option<Self> {
             let url = std::env::var("DATABASE_URL").ok()?;
             let admin = PgPool::connect(&url).await.expect("DATABASE_URL connects");
-            let name = format!("ferry_test_{}_{}", std::process::id(), rand_suffix());
+            let name = format!("ferry_test_{}_{}", std::process::id(), unique_suffix());
             // The name is made here, not taken from input.
             sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
                 .execute(&admin)
@@ -384,11 +384,17 @@ pub(crate) mod tests {
         }
     }
 
-    fn rand_suffix() -> u64 {
-        std::time::SystemTime::now()
+    /// Tests run in parallel and can read the same clock, so a counter keeps
+    /// names apart within a run; the time keeps them clear of databases a
+    /// panicked earlier run with the same pid left behind.
+    fn unique_suffix() -> String {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .subsec_nanos() as u64
+            .subsec_nanos();
+        format!("{n}_{nanos}")
     }
 
     fn terminal(id: u32, name: &str) -> Terminal {
